@@ -56,6 +56,12 @@ type 'a loc = 'a Location.loc = {
   loc : Location.t;
 }
 
+(* Represents active patterns structured names *)
+type structured_name = 
+  | Total_single   of string loc       (* (|A|)             *)
+  | Total_multi    of string loc list  (* (|A_1|...|A_n|)   *)
+  | Partial_single of string loc       (* (|A|_|)           *)
+  | Partial_multi  of string loc list  (* (|A_1|...|A_n|_|) *)
 
 type variance =
   | Covariant

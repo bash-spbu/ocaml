@@ -197,6 +197,11 @@ and pattern_desc =
         (* _ *)
   | Ppat_var of string loc
         (* x *)
+  | Ppat_structured_name of structured_name
+        (* (|C|)              single-case total
+           (|C_1|...|C_n|_|)  multi-case  total
+           (|C|_|)            single-case partial
+           (|C_1|...|C_n|_|)  multi-case  partial *)
   | Ppat_alias of pattern * string loc
         (* P as 'a *)
   | Ppat_constant of constant
@@ -210,6 +215,17 @@ and pattern_desc =
         (* (P1, ..., Pn)
 
            Invariant: n >= 2
+        *)
+  | Ppat_parameterized of Longident.t loc * expression list * pattern
+        (* C param_1 ... param_n P
+
+           Represents active pattern parameterization:
+           Regexp "(\w+)-(\w+)" [l;r]       
+             longident   = Regexp
+             params list = ["(\w+)-(\w+)"]
+             pattern = Ppat_construct(::, Some(Ppat_tuple [Ppat_var "l", ...]))
+
+           Invariant: n >= 1
         *)
   | Ppat_construct of Longident.t loc * pattern option
         (* C                None

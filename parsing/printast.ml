@@ -137,6 +137,16 @@ let arg_label i ppf = function
   | Optional s -> line i ppf "Optional \"%s\"\n" s
   | Labelled s -> line i ppf "Labelled \"%s\"\n" s
 ;;
+let structured_name i ppf = function
+  | Total_single   id -> line i ppf "Total_single %a\n"   fmt_string_loc id
+  | Partial_single id -> line i ppf "Partial_single %a\n" fmt_string_loc id
+  | Total_multi   ids -> 
+      line i ppf "Total_multi %a\n" 
+        (fun ppf -> List.iter (fmt_string_loc ppf)) ids
+  | Partial_multi ids ->
+      line i ppf "Partial_multi %a\n" 
+        (fun ppf -> List.iter (fmt_string_loc ppf)) ids
+;;
 
 let rec core_type i ppf x =
   line i ppf "core_type %a\n" fmt_location x.ptyp_loc;
@@ -204,6 +214,9 @@ and pattern i ppf x =
   match x.ppat_desc with
   | Ppat_any -> line i ppf "Ppat_any\n";
   | Ppat_var (s) -> line i ppf "Ppat_var %a\n" fmt_string_loc s;
+  | Ppat_structured_name (sn) -> 
+      line i ppf "Ppat_structured_name\n";
+      structured_name i ppf sn;
   | Ppat_alias (p, s) ->
       line i ppf "Ppat_alias %a\n" fmt_string_loc s;
       pattern i ppf p;
@@ -216,6 +229,10 @@ and pattern i ppf x =
   | Ppat_construct (li, po) ->
       line i ppf "Ppat_construct %a\n" fmt_longident_loc li;
       option i pattern ppf po;
+  | Ppat_parameterized (li, el, p) ->
+      line i ppf "Ppat_parameterized %a\n" fmt_longident_loc li;
+      list i expression ppf el;
+      pattern i ppf p;
   | Ppat_variant (l, po) ->
       line i ppf "Ppat_variant \"%s\"\n" l;
       option i pattern ppf po;

@@ -561,6 +561,7 @@ let mk_directive ~loc name arg =
 %token BAR
 %token BARBAR
 %token BARRBRACKET
+%token BARRPAREN
 %token BEGIN
 %token <char> CHAR
 %token CLASS
@@ -619,6 +620,7 @@ let mk_directive ~loc name arg =
 %token LET
 %token <string> LIDENT
 %token LPAREN
+%token LPARENBAR
 %token LBRACKETAT
 %token LBRACKETATAT
 %token LBRACKETATATAT
@@ -2577,17 +2579,23 @@ pattern_no_exn:
 ;
 
 pattern_gen:
-    simple_pattern
-      { $1 }
-  | mkpat(
-      mkrhs(constr_longident) pattern %prec prec_constr_appl
-        { Ppat_construct($1, Some $2) }
-    | name_tag pattern %prec prec_constr_appl
-        { Ppat_variant($1, Some $2) }
-    ) { $1 }
+  | simple_pattern { $1 }
+  | constr_gen     { $1 }
   | LAZY ext_attributes simple_pattern
       { mkpat_attrs ~loc:$sloc (Ppat_lazy $3) $2}
 ;
+
+constr_gen:
+  | mkrhs(constr_longident) pattern %prec prec_constr_appl 
+      { mkpat ~loc:$sloc (Ppat_construct($1, Some $2)) }
+  | name_tag                pattern %prec prec_constr_appl 
+      { mkpat ~loc:$sloc (Ppat_variant  ($1, Some $2)) }
+  | LESS mkrhs(constr_longident) nonempty_llist(simple_expr) GREATER pattern 
+      { mkpat ~loc:$sloc (Ppat_parameterized($2, $3, $5)) }
+  | LESS mkrhs(constr_longident) nonempty_llist(simple_expr) error
+      { unclosed "<" $loc($1) ">" $loc($4) }
+;
+
 simple_pattern:
     mkpat(mkrhs(val_ident) %prec below_EQUAL
       { Ppat_var ($1) })
@@ -2666,6 +2674,10 @@ simple_delimited_pattern:
       { Ppat_array [] }
     | LBRACKETBAR pattern_semi_list error
       { unclosed "[|" $loc($1) "|]" $loc($3) }
+    | LPARENBAR structured_name_tags BARRPAREN
+      { Ppat_structured_name($2) }
+    | LPARENBAR structured_name_tags error
+      { unclosed "(|" $loc($1) "|)" $loc($3) }
   ) { $1 }
 
 pattern_comma_list(self):
@@ -2700,6 +2712,18 @@ pattern_comma_list(self):
       label, mkpat_opt_constraint ~loc:$sloc pat octy
     }
 ;
+
+structured_name_tags:
+  | mkrhs(UIDENT)  
+      { Total_single   $1 }
+  | mkrhs(UIDENT) BAR UNDERSCORE
+      { Partial_single $1 }
+  | separated_nontrivial_llist(BAR, mkrhs(UIDENT))
+      { Total_multi    $1 }
+  | separated_nontrivial_llist(BAR, mkrhs(UIDENT)) BAR UNDERSCORE 
+      { Partial_multi  $1 }       
+    (* "_" can occur only as the last element of the structured name *)
+  | UNDERSCORE error { not_expecting $loc($1) "_" }
 
 /* Value descriptions */
 
