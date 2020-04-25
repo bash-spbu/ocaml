@@ -319,6 +319,14 @@ let pattern sub pat =
           | _ ->
               Ppat_var name
         end
+    | Tpat_structured_name (_, name, tag_ids) ->
+        Ppat_structured_name(
+          name, 
+          match tag_ids with
+          | Typedtree.Total_single   (_, tag) -> Parsetree.Total_single   tag
+          | Typedtree.Partial_single (_, tag) -> Parsetree.Partial_single tag
+          | Typedtree.Total_multi tags -> 
+              Parsetree.Total_multi (List.map snd tags))
 
     (* We transform (_ as x) in x if _ and x have the same location.
        The compiler transforms (x:t) into (_ as x : t).
@@ -333,7 +341,7 @@ let pattern sub pat =
     | Tpat_constant cst -> Ppat_constant (constant cst)
     | Tpat_tuple list ->
         Ppat_tuple (List.map (sub.pat sub) list)
-    | Tpat_construct (lid, _, args) ->
+    | Tpat_construct (lid, _, args) | Tpat_active (lid, _, _, args) ->
         Ppat_construct (map_loc sub lid,
           (match args with
               [] -> None
@@ -344,6 +352,8 @@ let pattern sub pat =
                      (List.map (sub.pat sub) args)
                   )
           ))
+    | Tpat_parameterized (lid, _, _, exprs, pat) ->
+        Ppat_parameterized (lid, List.map (sub.expr sub) exprs, sub.pat sub pat)
     | Tpat_variant (label, pato, _) ->
         Ppat_variant (label, map_opt (sub.pat sub) pato)
     | Tpat_record (list, closed) ->

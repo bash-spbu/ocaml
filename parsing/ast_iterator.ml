@@ -20,7 +20,7 @@
   (* Ensure that record patterns don't miss any field. *)
 *)
 
-open Asttypes
+
 open Parsetree
 open Location
 
@@ -422,19 +422,19 @@ end
 module P = struct
   (* Patterns *)
 
-  let iter_structured_name sub = function
-    | Total_single   id -> iter_loc sub id
-    | Partial_single id -> iter_loc sub id
-    | Total_multi   ids -> List.iter (iter_loc sub) ids
-    | Partial_multi ids -> List.iter (iter_loc sub) ids
-
   let iter sub {ppat_desc = desc; ppat_loc = loc; ppat_attributes = attrs} =
     sub.location sub loc;
     sub.attributes sub attrs;
     match desc with
     | Ppat_any -> ()
     | Ppat_var s -> iter_loc sub s
-    | Ppat_structured_name sn -> iter_structured_name sub sn
+    | Ppat_structured_name (name, tags) -> 
+        iter_loc sub name;
+        begin match tags with
+        | Total_single   id -> iter_loc sub id
+        | Partial_single id -> iter_loc sub id
+        | Total_multi   ids -> List.iter (iter_loc sub) ids
+        end
     | Ppat_alias (p, s) -> sub.pat sub p; iter_loc sub s
     | Ppat_constant _ -> ()
     | Ppat_interval _ -> ()

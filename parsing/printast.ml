@@ -143,9 +143,6 @@ let structured_name i ppf = function
   | Total_multi   ids -> 
       line i ppf "Total_multi %a\n" 
         (fun ppf -> List.iter (fmt_string_loc ppf)) ids
-  | Partial_multi ids ->
-      line i ppf "Partial_multi %a\n" 
-        (fun ppf -> List.iter (fmt_string_loc ppf)) ids
 ;;
 
 let rec core_type i ppf x =
@@ -214,9 +211,9 @@ and pattern i ppf x =
   match x.ppat_desc with
   | Ppat_any -> line i ppf "Ppat_any\n";
   | Ppat_var (s) -> line i ppf "Ppat_var %a\n" fmt_string_loc s;
-  | Ppat_structured_name (sn) -> 
-      line i ppf "Ppat_structured_name\n";
-      structured_name i ppf sn;
+  | Ppat_structured_name (name, tags) -> 
+      line i ppf "Ppat_structured_name %a\n" fmt_string_loc name;
+      structured_name i ppf tags;
   | Ppat_alias (p, s) ->
       line i ppf "Ppat_alias %a\n" fmt_string_loc s;
       pattern i ppf p;

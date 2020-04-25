@@ -50,6 +50,7 @@ let rec pretty_val ppf v =
   match v.pat_desc with
   | Tpat_any -> fprintf ppf "_"
   | Tpat_var (x,_) -> fprintf ppf "%s" (Ident.name x)
+  | Tpat_structured_name (li, _, _) -> fprintf ppf "%s" (Ident.name li)
   | Tpat_constant c -> fprintf ppf "%s" (pretty_const c)
   | Tpat_tuple vs ->
       fprintf ppf "@[(%a)@]" (pretty_vals ",") vs
@@ -65,6 +66,19 @@ let rec pretty_val ppf v =
       |  _ ->
           fprintf ppf "@[<2>%s@ @[(%a)@]@]" name (pretty_vals ",") vs
       end
+  | Tpat_active (li, _, _, []) ->
+      fprintf ppf "%s" (Longident.last li.txt)
+  | Tpat_active (li, _, _, [w]) ->
+      fprintf ppf "@[<2>%s@ %a@]" (Longident.last li.txt) pretty_arg w
+  | Tpat_active (li, _, _, vs) ->
+      fprintf ppf "@[<2>%s@ @[(%a)@]@]" 
+        (Longident.last li.txt) (pretty_vals ",") vs
+  | Tpat_parameterized(li, _, _, exprs, pat) ->
+      fprintf ppf "@[<2><%s %s>@ %a@]" 
+        (Longident.last li.txt) 
+        (* TODO: add expression printers *) 
+        (String.concat " " (List.map (fun _ -> "_") exprs)) 
+        pretty_arg pat
   | Tpat_variant (l, None, _) ->
       fprintf ppf "`%s" l
   | Tpat_variant (l, Some w, _) ->

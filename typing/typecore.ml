@@ -52,9 +52,11 @@ type existential_restriction =
 type error =
   | Constructor_arity_mismatch of Longident.t * int * int
   | Label_mismatch of Longident.t * Ctype.Unification_trace.t
+  | Too_many_tags_for_active_pattern of int
   | Pattern_type_clash of Ctype.Unification_trace.t * pattern_desc option
   | Or_pattern_type_clash of Ident.t * Ctype.Unification_trace.t
   | Multiply_bound_variable of string
+  | Multiply_bound_active_tag of string
   | Orpat_vars of Ident.t * Ident.t list
   | Expr_type_clash of
       Ctype.Unification_trace.t * type_forcing_context option
@@ -76,6 +78,7 @@ type error =
   | Private_label of Longident.t * type_expr
   | Private_constructor of constructor_description * type_expr
   | Unbound_instance_variable of string * string list
+  | Unbound_tag of string
   | Instance_variable_not_mutable of bool * string
   | Not_subtype of Ctype.Unification_trace.t * Ctype.Unification_trace.t
   | Outside_class
@@ -476,17 +479,26 @@ type pattern_variable =
 type module_variable =
   string loc * Location.t
 
+type active_tag =
+  {
+    at_id: Ident.t;
+    at_type: type_expr; (* type of the whole active pattern *)
+    at_loc: Location.t;
+  }
+
 let pattern_variables = ref ([] : pattern_variable list)
 let pattern_force = ref ([] : (unit -> unit) list)
 let pattern_scope = ref (None : Annot.ident option);;
 let allow_modules = ref false
 let module_variables = ref ([] : module_variable list)
+let active_tags = ref ([] : active_tag list)
 let reset_pattern scope allow =
   pattern_variables := [];
   pattern_force := [];
   pattern_scope := scope;
   allow_modules := allow;
   module_variables := [];
+  active_tags   := [];
 ;;
 
 let maybe_add_pattern_variables_ghost loc_let env pv =
@@ -567,6 +579,17 @@ let enter_orpat_variables loc env  p1_vs p2_vs =
           raise (Error (loc, env, err)) in
   unify_vars p1_vs p2_vs
 
+let enter_active_tag tag ty =
+  if List.exists (fun {at_id; _} -> Ident.name at_id = tag.txt) !active_tags
+  then
+    raise(Error(tag.loc, Env.empty, Multiply_bound_active_tag tag.txt));
+  let id = Ident.create_local tag.txt in
+  active_tags :=
+    {at_id   = id;
+     at_type = ty;
+     at_loc  = tag.loc} :: !active_tags;
+  id
+
 let rec build_as_type env p =
   match p.pat_desc with
     Tpat_alias(p1,_, _) -> build_as_type env p1
@@ -581,6 +604,22 @@ let rec build_as_type env p =
       List.iter2 (fun (p,ty) -> unify_pat env {p with pat_type = ty})
         (List.combine pl tyl) ty_args;
       ty_res
+  (* | Tpat_active(_tag, _path, _active_pat, _args) -> 
+      (* TODO *)
+      assert false *)
+  | Tpat_parameterized(tag, _, active_pat, params, arg) -> 
+      let ty_arg = build_as_type env arg in
+      let active_pattern_inferred_type = 
+        List.fold_right
+          (fun param acc -> 
+              newty (Tarrow((* TODO *) Nolabel, param.exp_type, acc, Cok)))
+          params
+          (type_option ty_arg)
+      in
+      let ty = instance active_pat.val_type in
+      unify_exp_types
+        tag.loc env ty (instance active_pattern_inferred_type);
+      ty_arg
   | Tpat_variant(l, p', _) ->
       let ty = may_map (build_as_type env) p' in
       newty (Tvariant{row_fields=[l, Rpresent ty]; row_more=newvar();
@@ -617,7 +656,7 @@ let rec build_as_type env p =
           let row = row_repr row in
           newty (Tvariant{row with row_closed=false; row_more=newvar()})
       end
-  | Tpat_any | Tpat_var _ | Tpat_constant _
+  | Tpat_any | Tpat_var _ | Tpat_constant _ | Tpat_structured_name _
   | Tpat_array _ | Tpat_lazy _ | Tpat_exception _ -> p.pat_type
 
 let build_or_pat env loc lid =
@@ -1065,6 +1104,7 @@ type half_typed_case =
     branch_env: Env.t;
     pat_vars: pattern_variable list;
     unpacks: module_variable list;
+    active_tags: active_tag list;
     contains_gadt: bool; }
 
 let all_idents_cases half_typed_cases =
@@ -1092,6 +1132,7 @@ let rec has_literal_pattern p = match p.ppat_desc with
   | Ppat_interval _ ->
      true
   | Ppat_any
+  | Ppat_structured_name _
   | Ppat_variant (_, None)
   | Ppat_construct (_, None)
   | Ppat_type _
@@ -1102,6 +1143,7 @@ let rec has_literal_pattern p = match p.ppat_desc with
   | Ppat_exception p
   | Ppat_variant (_, Some p)
   | Ppat_construct (_, Some p)
+  | Ppat_parameterized (_, _, p)
   | Ppat_constraint (p, _)
   | Ppat_alias (p, _)
   | Ppat_lazy p
@@ -1122,634 +1164,6 @@ let check_scope_escape loc env level ty =
   with Unify trace ->
     raise(Error(loc, env, Pattern_type_clash(trace, None)))
 
-(* type_pat propagates the expected type as well as maps for
-   constructors and labels.
-   Unification may update the typing environment. *)
-(* constrs <> None => called from parmatch: backtrack on or-patterns
-   explode > 0 => explode Ppat_any for gadts *)
-let rec type_pat ?(exception_allowed=false) ~constrs ~labels ~no_existentials
-          ~mode ~explode ~env sp expected_ty k =
-  Builtin_attributes.warning_scope sp.ppat_attributes
-    (fun () ->
-       type_pat_aux ~exception_allowed ~constrs ~labels ~no_existentials ~mode
-         ~explode ~env sp expected_ty k
-    )
-
-and type_pat_aux ~exception_allowed ~constrs ~labels ~no_existentials ~mode
-      ~explode ~env sp expected_ty k =
-  let mode' = if mode = Splitting_or then Normal else mode in
-  let type_pat ?(exception_allowed=false) ?(constrs=constrs) ?(labels=labels)
-        ?(mode=mode') ?(explode=explode) ?(env=env) =
-    type_pat ~exception_allowed ~constrs ~labels ~no_existentials ~mode ~explode
-      ~env
-  in
-  let loc = sp.ppat_loc in
-  let rup k x =
-    if constrs = None then (ignore (rp x));
-    unify_pat !env x (instance expected_ty);
-    k x
-  in
-  let rp k x : pattern = if constrs = None then k (rp x) else k x in
-  match sp.ppat_desc with
-    Ppat_any ->
-      let k' d = rp k {
-        pat_desc = d;
-        pat_loc = loc; pat_extra=[];
-        pat_type = instance expected_ty;
-        pat_attributes = sp.ppat_attributes;
-        pat_env = !env }
-      in
-      if explode > 0 then
-        let (sp, constrs, labels) =
-          try
-            Parmatch.ppat_of_type !env expected_ty
-          with Parmatch.Empty -> raise (Error (loc, !env, Empty_pattern))
-        in
-        if sp.ppat_desc = Parsetree.Ppat_any then k' Tpat_any else
-        if mode = Inside_or then raise Need_backtrack else
-        let explode =
-          match sp.ppat_desc with
-            Parsetree.Ppat_or _ -> explode - 5
-          | _ -> explode - 1
-        in
-        type_pat ~constrs:(Some constrs) ~labels:(Some labels)
-          ~explode sp expected_ty k
-      else k' Tpat_any
-  | Ppat_var name ->
-      let ty = instance expected_ty in
-      let id = (* PR#7330 *)
-        if name.txt = "*extension*" then
-          Ident.create_local name.txt
-        else
-          enter_variable loc name ty sp.ppat_attributes
-      in
-      rp k {
-        pat_desc = Tpat_var (id, name);
-        pat_loc = loc; pat_extra=[];
-        pat_type = ty;
-        pat_attributes = sp.ppat_attributes;
-        pat_env = !env }
-  | Ppat_unpack name ->
-      assert (constrs = None);
-      let t = instance expected_ty in
-      let id = enter_variable loc name t ~is_module:true sp.ppat_attributes in
-      rp k {
-        pat_desc = Tpat_var (id, name);
-        pat_loc = sp.ppat_loc;
-        pat_extra=[Tpat_unpack, loc, sp.ppat_attributes];
-        pat_type = t;
-        pat_attributes = [];
-        pat_env = !env }
-  | Ppat_constraint(
-      {ppat_desc=Ppat_var name; ppat_loc=lloc; ppat_attributes = attrs},
-      ({ptyp_desc=Ptyp_poly _} as sty)) ->
-      (* explicitly polymorphic type *)
-      assert (constrs = None);
-      let cty, force = Typetexp.transl_simple_type_delayed !env sty in
-      let ty = cty.ctyp_type in
-      unify_pat_types lloc !env ty (instance expected_ty);
-      pattern_force := force :: !pattern_force;
-      begin match ty.desc with
-      | Tpoly (body, tyl) ->
-          begin_def ();
-          let _, ty' = instance_poly ~keep_names:true false tyl body in
-          end_def ();
-          generalize ty';
-          let id = enter_variable lloc name ty' attrs in
-          rp k {
-            pat_desc = Tpat_var (id, name);
-            pat_loc = lloc;
-            pat_extra = [Tpat_constraint cty, loc, sp.ppat_attributes];
-            pat_type = ty;
-            pat_attributes = [];
-            pat_env = !env
-          }
-      | _ -> assert false
-      end
-  | Ppat_alias(sq, name) ->
-      assert (constrs = None);
-      type_pat sq expected_ty (fun q ->
-        begin_def ();
-        let ty_var = build_as_type !env q in
-        end_def ();
-        generalize ty_var;
-        let id =
-          enter_variable ~is_as_variable:true loc name ty_var sp.ppat_attributes
-        in
-        rp k {
-          pat_desc = Tpat_alias(q, id, name);
-          pat_loc = loc; pat_extra=[];
-          pat_type = q.pat_type;
-          pat_attributes = sp.ppat_attributes;
-          pat_env = !env })
-  | Ppat_constant cst ->
-      let cst = constant_or_raise !env loc cst in
-      rup k {
-        pat_desc = Tpat_constant cst;
-        pat_loc = loc; pat_extra=[];
-        pat_type = type_constant cst;
-        pat_attributes = sp.ppat_attributes;
-        pat_env = !env }
-  | Ppat_interval (Pconst_char c1, Pconst_char c2) ->
-      let open Ast_helper.Pat in
-      let gloc = {loc with Location.loc_ghost=true} in
-      let rec loop c1 c2 =
-        if c1 = c2 then constant ~loc:gloc (Pconst_char c1)
-        else
-          or_ ~loc:gloc
-            (constant ~loc:gloc (Pconst_char c1))
-            (loop (Char.chr(Char.code c1 + 1)) c2)
-      in
-      let p = if c1 <= c2 then loop c1 c2 else loop c2 c1 in
-      let p = {p with ppat_loc=loc} in
-      type_pat ~explode:0 p expected_ty k
-        (* TODO: record 'extra' to remember about interval *)
-  | Ppat_interval _ ->
-      raise (Error (loc, !env, Invalid_interval))
-  | Ppat_tuple spl ->
-      assert (List.length spl >= 2);
-      let spl_ann = List.map (fun p -> (p,newgenvar ())) spl in
-      let ty = newgenty (Ttuple(List.map snd spl_ann)) in
-      begin_def ();
-      let expected_ty = instance expected_ty in
-      end_def ();
-      generalize_structure expected_ty;
-      unify_pat_types loc !env ty expected_ty;
-      map_fold_cont (fun (p,t) -> type_pat p t) spl_ann (fun pl ->
-        rp k {
-        pat_desc = Tpat_tuple pl;
-        pat_loc = loc; pat_extra=[];
-        pat_type = newty (Ttuple(List.map (fun p -> p.pat_type) pl));
-        pat_attributes = sp.ppat_attributes;
-        pat_env = !env })
-  | Ppat_construct(lid, sarg) ->
-      let opath =
-        try
-          let (p0, p, _) = extract_concrete_variant !env expected_ty in
-            Some (p0, p, true)
-        with Not_found -> None
-      in
-      let candidates =
-        match lid.txt, constrs with
-          Longident.Lident s, Some constrs when Hashtbl.mem constrs s ->
-            [Hashtbl.find constrs s, (fun () -> ())]
-        | _ ->  Typetexp.find_all_constructors !env lid.loc lid.txt
-      in
-      let constr =
-        wrap_disambiguate "This variant pattern is expected to have"
-          (mk_expected expected_ty)
-          (Constructor.disambiguate lid !env opath) candidates
-      in
-      if constr.cstr_generalized && constrs <> None && mode = Inside_or
-      then raise Need_backtrack;
-      Env.mark_constructor Env.Pattern !env (Longident.last lid.txt) constr;
-      Builtin_attributes.check_alerts loc constr.cstr_attributes
-        constr.cstr_name;
-      begin match no_existentials, constr.cstr_existentials with
-      | None, _ | _, [] -> ()
-      | Some r, (_ :: _ as exs)  ->
-          let exs = List.map (Ctype.existential_name constr) exs in
-          let name = constr.cstr_name in
-          raise (Error (loc, !env, Unexpected_existential (r,name, exs)))
-      end;
-      (* if constructor is gadt, we must verify that the expected type has the
-         correct head *)
-      if constr.cstr_generalized then
-        unify_head_only loc !env (instance expected_ty) constr;
-      let sargs =
-        match sarg with
-          None -> []
-        | Some {ppat_desc = Ppat_tuple spl} when
-            constr.cstr_arity > 1 ||
-            Builtin_attributes.explicit_arity sp.ppat_attributes
-          -> spl
-        | Some({ppat_desc = Ppat_any} as sp) when constr.cstr_arity <> 1 ->
-            if constr.cstr_arity = 0 then
-              Location.prerr_warning sp.ppat_loc
-                                     Warnings.Wildcard_arg_to_constant_constr;
-            replicate_list sp constr.cstr_arity
-        | Some sp -> [sp] in
-      if Builtin_attributes.warn_on_literal_pattern constr.cstr_attributes then
-        begin match List.filter has_literal_pattern sargs with
-        | sp :: _ ->
-           Location.prerr_warning sp.ppat_loc Warnings.Fragile_literal_pattern
-        | _ -> ()
-        end;
-      if List.length sargs <> constr.cstr_arity then
-        raise(Error(loc, !env, Constructor_arity_mismatch(lid.txt,
-                                     constr.cstr_arity, List.length sargs)));
-      begin_def ();
-      let (ty_args, ty_res) =
-        instance_constructor ~in_pattern:(env, get_gadt_equations_level ())
-          constr
-      in
-      let expected_ty = instance expected_ty in
-      (* PR#7214: do not use gadt unification for toplevel lets *)
-      if not constr.cstr_generalized || no_existentials <> None
-      then unify_pat_types loc !env ty_res expected_ty
-      else unify_pat_types_gadt loc env ty_res expected_ty;
-      end_def ();
-      generalize_structure expected_ty;
-      generalize_structure ty_res;
-      List.iter generalize_structure ty_args;
-
-      let rec check_non_escaping p =
-        match p.ppat_desc with
-        | Ppat_or (p1, p2) ->
-            check_non_escaping p1;
-            check_non_escaping p2
-        | Ppat_alias (p, _) ->
-            check_non_escaping p
-        | Ppat_constraint _ ->
-            raise (Error (p.ppat_loc, !env, Inlined_record_escape))
-        | _ ->
-            ()
-      in
-      if constr.cstr_inlined <> None then List.iter check_non_escaping sargs;
-
-      map_fold_cont (fun (p,t) -> type_pat p t) (List.combine sargs ty_args)
-      (fun args ->
-        rp k {
-          pat_desc=Tpat_construct(lid, constr, args);
-          pat_loc = loc; pat_extra=[];
-          pat_type = instance expected_ty;
-          pat_attributes = sp.ppat_attributes;
-          pat_env = !env })
-  | Ppat_variant(l, sarg) ->
-      let arg_type = match sarg with None -> [] | Some _ -> [newgenvar()] in
-      let row = { row_fields =
-                    [l, Reither(sarg = None, arg_type, true, ref None)];
-                  row_bound = ();
-                  row_closed = false;
-                  row_more = newgenvar ();
-                  row_fixed = false;
-                  row_name = None } in
-      begin_def ();
-      let expected_ty = instance expected_ty in
-      end_def ();
-      generalize_structure expected_ty;
-      (* PR#7404: allow some_private_tag blindly, as it would not unify with
-         the abstract row variable *)
-      if l = Parmatch.some_private_tag then assert (constrs <> None)
-      else unify_pat_types loc !env (newgenty (Tvariant row)) expected_ty;
-      let k arg =
-        rp k {
-        pat_desc = Tpat_variant(l, arg, ref {row with row_more = newvar()});
-        pat_loc = loc; pat_extra=[];
-        pat_type = instance expected_ty;
-        pat_attributes = sp.ppat_attributes;
-        pat_env = !env }
-      in begin
-        (* PR#6235: propagate type information *)
-        match sarg, arg_type with
-          Some p, [ty] -> type_pat p ty (fun p -> k (Some p))
-        | _            -> k None
-      end
-  | Ppat_record(lid_sp_list, closed) ->
-      assert (lid_sp_list <> []);
-      let opath, record_ty =
-        try
-          let (p0, p,_) = extract_concrete_record !env expected_ty in
-          begin_def ();
-          let ty = instance expected_ty in
-          end_def ();
-          generalize_structure ty;
-          Some (p0, p, true), ty
-        with Not_found -> None, newvar ()
-      in
-      let type_label_pat (label_lid, label, sarg) k =
-        begin_def ();
-        let (_, ty_arg, ty_res) = instance_label false label in
-        begin try
-          unify_pat_types loc !env ty_res (instance record_ty)
-        with Error(_loc, _env, Pattern_type_clash(trace, _)) ->
-          raise(Error(label_lid.loc, !env,
-                      Label_mismatch(label_lid.txt, trace)))
-        end;
-        end_def ();
-        generalize_structure ty_res;
-        generalize_structure ty_arg;
-        type_pat sarg ty_arg (fun arg ->
-          k (label_lid, label, arg))
-      in
-      let k' k lbl_pat_list =
-        check_recordpat_labels loc lbl_pat_list closed;
-        rup k {
-        pat_desc = Tpat_record (lbl_pat_list, closed);
-        pat_loc = loc; pat_extra=[];
-        pat_type = instance record_ty;
-        pat_attributes = sp.ppat_attributes;
-        pat_env = !env }
-      in
-      if constrs = None then
-        k (wrap_disambiguate "This record pattern is expected to have"
-             (mk_expected expected_ty)
-             (type_label_a_list ?labels loc false !env type_label_pat opath
-                lid_sp_list)
-             (k' (fun x -> x)))
-      else
-        type_label_a_list ?labels loc false !env type_label_pat opath
-          lid_sp_list (k' k)
-  | Ppat_array spl ->
-      let ty_elt = newgenvar() in
-      begin_def ();
-      let expected_ty = instance expected_ty in
-      end_def ();
-      generalize_structure expected_ty;
-      unify_pat_types
-        loc !env (Predef.type_array ty_elt) expected_ty;
-      map_fold_cont (fun p -> type_pat p ty_elt) spl (fun pl ->
-        rp k {
-        pat_desc = Tpat_array pl;
-        pat_loc = loc; pat_extra=[];
-        pat_type = instance expected_ty;
-        pat_attributes = sp.ppat_attributes;
-        pat_env = !env })
-  | Ppat_or(sp1, sp2) ->
-      let state = save_state env in
-      begin match
-        if mode = Split_or || mode = Splitting_or then raise Need_backtrack;
-        let initial_pattern_variables = !pattern_variables in
-        let initial_module_variables = !module_variables in
-        let equation_level = !gadt_equations_level in
-        let outter_lev = get_current_level () in
-        (* introduce a new scope *)
-        begin_def ();
-        let lev = get_current_level () in
-        gadt_equations_level := Some lev;
-        let env1 = ref !env in
-        let p1 =
-          try Some (type_pat ~exception_allowed ~mode:Inside_or sp1 expected_ty
-                      ~env:env1 (fun x -> x))
-          with Need_backtrack -> None in
-        let p1_variables = !pattern_variables in
-        let p1_module_variables = !module_variables in
-        pattern_variables := initial_pattern_variables;
-        module_variables := initial_module_variables;
-        let env2 = ref !env in
-        let p2 =
-          try Some (type_pat ~exception_allowed ~mode:Inside_or sp2 expected_ty
-                      ~env:env2 (fun x -> x))
-          with Need_backtrack -> None in
-        end_def ();
-        gadt_equations_level := equation_level;
-        let p2_variables = !pattern_variables in
-        (* Make sure no variable with an ambiguous type gets added to the
-           environment. *)
-        List.iter (fun { pv_type; pv_loc; _ } ->
-          check_scope_escape pv_loc !env1 outter_lev pv_type
-        ) p1_variables;
-        List.iter (fun { pv_type; pv_loc; _ } ->
-          check_scope_escape pv_loc !env2 outter_lev pv_type
-        ) p2_variables;
-        match p1, p2 with
-          None, None -> raise Need_backtrack
-        | Some p, None | None, Some p -> p (* no variables in this case *)
-        | Some p1, Some p2 ->
-        let alpha_env =
-          enter_orpat_variables loc !env p1_variables p2_variables in
-        pattern_variables := p1_variables;
-        module_variables := p1_module_variables;
-        { pat_desc = Tpat_or(p1, alpha_pat alpha_env p2, None);
-          pat_loc = loc; pat_extra=[];
-          pat_type = instance expected_ty;
-          pat_attributes = sp.ppat_attributes;
-          pat_env = !env }
-      with
-        p -> rp k p
-      | exception Need_backtrack when mode <> Inside_or ->
-          assert (constrs <> None);
-          set_state state env;
-          let mode =
-            if mode = Split_or then mode else Splitting_or in
-          try type_pat ~exception_allowed ~mode sp1 expected_ty k
-          with Error _ ->
-            set_state state env;
-            type_pat ~exception_allowed ~mode sp2 expected_ty k
-      end
-  | Ppat_lazy sp1 ->
-      let nv = newgenvar () in
-      unify_pat_types loc !env (Predef.type_lazy_t nv) expected_ty;
-      (* do not explode under lazy: PR#7421 *)
-      type_pat ~explode:0 sp1 nv (fun p1 ->
-        rp k {
-        pat_desc = Tpat_lazy p1;
-        pat_loc = loc; pat_extra=[];
-        pat_type = instance expected_ty;
-        pat_attributes = sp.ppat_attributes;
-        pat_env = !env })
-  | Ppat_constraint(sp, sty) ->
-      (* Pretend separate = true *)
-      begin_def();
-      let cty, force = Typetexp.transl_simple_type_delayed !env sty in
-      let ty = cty.ctyp_type in
-      end_def();
-      generalize_structure ty;
-      let ty, expected_ty' = instance ty, ty in
-      unify_pat_types loc !env ty (instance expected_ty);
-      type_pat ~exception_allowed sp expected_ty' (fun p ->
-        (*Format.printf "%a@.%a@."
-          Printtyp.raw_type_expr ty
-          Printtyp.raw_type_expr p.pat_type;*)
-        pattern_force := force :: !pattern_force;
-        let extra = (Tpat_constraint cty, loc, sp.ppat_attributes) in
-        let p =
-          match p.pat_desc with
-            Tpat_var (id,s) ->
-              {p with pat_type = ty;
-               pat_desc = Tpat_alias
-                 ({p with pat_desc = Tpat_any; pat_attributes = []}, id,s);
-               pat_extra = [extra];
-             }
-          | _ -> {p with pat_type = ty;
-                  pat_extra = extra :: p.pat_extra}
-        in k p)
-  | Ppat_type lid ->
-      let (path, p,ty) = build_or_pat !env loc lid in
-      unify_pat_types loc !env ty (instance expected_ty);
-      k { p with pat_extra =
-        (Tpat_type (path, lid), loc, sp.ppat_attributes) :: p.pat_extra }
-  | Ppat_open (lid,p) ->
-      let path, new_env =
-        !type_open Asttypes.Fresh !env sp.ppat_loc lid in
-      let new_env = ref new_env in
-      type_pat ~exception_allowed ~env:new_env p expected_ty ( fun p ->
-        env := Env.copy_local !env ~from:!new_env;
-        k { p with pat_extra =( Tpat_open (path,lid,!new_env),
-                            loc, sp.ppat_attributes) :: p.pat_extra }
-      )
-  | Ppat_exception p ->
-      if not exception_allowed then
-        raise (Error (loc, !env, Exception_pattern_disallowed))
-      else begin
-        let p_exn = type_pat p Predef.type_exn k in
-        rp k {
-          pat_desc = Tpat_exception p_exn;
-          pat_loc = sp.ppat_loc;
-          pat_extra = [];
-          pat_type = expected_ty;
-          pat_env = !env;
-          pat_attributes = sp.ppat_attributes;
-        }
-      end
-  | Ppat_extension ext ->
-      raise (Error_forward (Builtin_attributes.error_of_extension ext))
-
-let type_pat ?exception_allowed ?no_existentials ?constrs ?labels ?(mode=Normal)
-    ?(explode=0) ?(lev=get_current_level()) env sp expected_ty =
-  Misc.protect_refs [Misc.R (gadt_equations_level, Some lev)] (fun () ->
-      let r =
-        type_pat ?exception_allowed ~no_existentials ~constrs ~labels ~mode
-          ~explode ~env sp expected_ty (fun x -> x)
-      in
-      iter_pattern (fun p -> p.pat_env <- !env) r;
-      r
-    )
-
-(* this function is passed to Partial.parmatch
-   to type check gadt nonexhaustiveness *)
-let partial_pred ~lev ?mode ?explode env expected_ty constrs labels p =
-  let env = ref env in
-  let state = save_state env in
-  try
-    reset_pattern None true;
-    let typed_p =
-      Ctype.with_passive_variants
-        (type_pat ~lev ~constrs ~labels ?mode ?explode env p)
-        expected_ty
-    in
-    set_state state env;
-    (* types are invalidated but we don't need them here *)
-    Some typed_p
-  with Error _ ->
-    set_state state env;
-    None
-
-let check_partial ?(lev=get_current_level ()) env expected_ty loc cases =
-  let explode = match cases with [_] -> 5 | _ -> 0 in
-  Parmatch.check_partial
-    (partial_pred ~lev ~explode env expected_ty) loc cases
-
-let check_unused ?(lev=get_current_level ()) env expected_ty cases =
-  Parmatch.check_unused
-    (fun refute constrs labels spat ->
-      match
-        partial_pred ~lev ~mode:Split_or ~explode:5
-          env expected_ty constrs labels spat
-      with
-        Some pat when refute ->
-          raise (Error (spat.ppat_loc, env, Unrefuted_pattern pat))
-      | r -> r)
-    cases
-
-let iter_pattern_variables_type f : pattern_variable list -> unit =
-  List.iter (fun {pv_type; _} -> f pv_type)
-
-let add_pattern_variables ?check ?check_as env pv =
-  List.fold_right
-    (fun {pv_id; pv_type; pv_loc; pv_as_var; pv_attributes} env ->
-       let check = if pv_as_var then check_as else check in
-       Env.add_value ?check pv_id
-         {val_type = pv_type; val_kind = Val_reg; Types.val_loc = pv_loc;
-          val_attributes = pv_attributes;
-         } env
-    )
-    pv env
-
-let type_pattern ?exception_allowed ~lev env spat scope expected_ty =
-  reset_pattern scope true;
-  let new_env = ref env in
-  let pat = type_pat ?exception_allowed ~lev new_env spat expected_ty in
-  let pvs = get_ref pattern_variables in
-  let unpacks = get_ref module_variables in
-  (pat, !new_env, get_ref pattern_force, pvs, unpacks)
-
-let type_pattern_list no_existentials env spatl scope expected_tys allow =
-  reset_pattern scope allow;
-  let new_env = ref env in
-  let type_pat (attrs, pat) ty =
-    Builtin_attributes.warning_scope ~ppwarning:false attrs
-      (fun () ->
-         type_pat ~no_existentials new_env pat ty
-      )
-  in
-  let patl = List.map2 type_pat spatl expected_tys in
-  let pvs = get_ref pattern_variables in
-  let unpacks = get_ref module_variables in
-  let new_env = add_pattern_variables !new_env pvs in
-  (patl, new_env, get_ref pattern_force, pvs, unpacks)
-
-let type_class_arg_pattern cl_num val_env met_env l spat =
-  reset_pattern None false;
-  let nv = newvar () in
-  let pat = type_pat ~no_existentials:In_class_args (ref val_env) spat nv in
-  if has_variants pat then begin
-    Parmatch.pressure_variants val_env [pat];
-    iter_pattern finalize_variant pat
-  end;
-  List.iter (fun f -> f()) (get_ref pattern_force);
-  if is_optional l then unify_pat val_env pat (type_option (newvar ()));
-  let (pv, met_env) =
-    List.fold_right
-      (fun {pv_id; pv_type; pv_loc; pv_as_var; pv_attributes} (pv, env) ->
-         let check s =
-           if pv_as_var then Warnings.Unused_var s
-           else Warnings.Unused_var_strict s in
-         let id' = Ident.create_local (Ident.name pv_id) in
-         ((id', pv_id, pv_type)::pv,
-          Env.add_value id' {val_type = pv_type;
-                             val_kind = Val_ivar (Immutable, cl_num);
-                             val_attributes = pv_attributes;
-                             Types.val_loc = pv_loc;
-                            } ~check
-            env))
-      !pattern_variables ([], met_env)
-  in
-  let val_env = add_pattern_variables val_env (get_ref pattern_variables) in
-  (pat, pv, val_env, met_env)
-
-let type_self_pattern cl_num privty val_env met_env par_env spat =
-  let open Ast_helper in
-  let spat =
-    Pat.mk (Ppat_alias (Pat.mk(Ppat_alias (spat, mknoloc "selfpat-*")),
-                        mknoloc ("selfpat-" ^ cl_num)))
-  in
-  reset_pattern None false;
-  let nv = newvar() in
-  let pat = type_pat ~no_existentials:In_self_pattern (ref val_env) spat nv in
-  List.iter (fun f -> f()) (get_ref pattern_force);
-  let meths = ref Meths.empty in
-  let vars = ref Vars.empty in
-  let pv = !pattern_variables in
-  pattern_variables := [];
-  let (val_env, met_env, par_env) =
-    List.fold_right
-      (fun {pv_id; pv_type; pv_loc; pv_as_var; pv_attributes}
-           (val_env, met_env, par_env) ->
-         (Env.add_value pv_id {val_type = pv_type;
-                               val_kind =
-                                 Val_unbound Val_unbound_instance_variable;
-                               val_attributes = pv_attributes;
-                               Types.val_loc = pv_loc;
-                              } val_env,
-          Env.add_value pv_id {val_type = pv_type;
-                               val_kind =
-                                 Val_self (meths, vars, cl_num, privty);
-                               val_attributes = pv_attributes;
-                               Types.val_loc = pv_loc;
-                              }
-            ~check:(fun s -> if pv_as_var then Warnings.Unused_var s
-                             else Warnings.Unused_var_strict s)
-            met_env,
-          Env.add_value pv_id {val_type = pv_type;
-                               val_kind =
-                                 Val_unbound Val_unbound_instance_variable;
-                               val_attributes = pv_attributes;
-                               Types.val_loc = pv_loc;
-                              } par_env))
-      pv (val_env, met_env, par_env)
-  in
-  (pat, meths, vars, val_env, met_env, par_env)
 
 let delayed_checks = ref []
 let reset_delayed_checks () = delayed_checks := []
@@ -2161,12 +1575,14 @@ let contains_variant_either ty =
 let iter_ppat f p =
   match p.ppat_desc with
   | Ppat_any | Ppat_var _ | Ppat_constant _ | Ppat_interval _
+  | Ppat_structured_name _
   | Ppat_extension _
   | Ppat_type _ | Ppat_unpack _ -> ()
   | Ppat_array pats -> List.iter f pats
   | Ppat_or (p1,p2) -> f p1; f p2
   | Ppat_variant (_, arg) | Ppat_construct (_, arg) -> may f arg
   | Ppat_tuple lst ->  List.iter f lst
+  | Ppat_parameterized (_, _, p)
   | Ppat_exception p | Ppat_alias (p,_)
   | Ppat_open (_,p)
   | Ppat_constraint (p,_) | Ppat_lazy p -> f p
@@ -4257,7 +3673,737 @@ and type_statement ?explanation env sexp =
     exp
   end
 
+(* Typing of patterns *)
+
+(* type_pat propagates the expected type as well as maps for
+   constructors and labels.
+   Unification may update the typing environment. *)
+(* constrs <> None => called from parmatch: backtrack on or-patterns
+   explode > 0 => explode Ppat_any for gadts *)
+and type_pat_ ?(exception_allowed=false) ~constrs ~labels ~no_existentials
+          ~mode ~explode ~env sp expected_ty k =
+  Builtin_attributes.warning_scope sp.ppat_attributes
+    (fun () ->
+       type_pat_aux ~exception_allowed ~constrs ~labels ~no_existentials ~mode
+         ~explode ~env sp expected_ty k
+    )
+
+and type_pat_aux ~exception_allowed ~constrs ~labels ~no_existentials ~mode
+      ~explode ~env sp expected_ty k =
+  let mode' = if mode = Splitting_or then Normal else mode in
+  let type_pat ?(exception_allowed=false) ?(constrs=constrs) ?(labels=labels)
+        ?(mode=mode') ?(explode=explode) ?(env=env) =
+    type_pat_ ~exception_allowed ~constrs ~labels ~no_existentials ~mode ~explode
+      ~env
+  in
+  let loc = sp.ppat_loc in
+  let rup k x =
+    if constrs = None then (ignore (rp x));
+    unify_pat !env x (instance expected_ty);
+    k x
+  in
+  let rp k x : pattern = if constrs = None then k (rp x) else k x in
+  match sp.ppat_desc with
+    Ppat_any ->
+      let k' d = rp k {
+        pat_desc = d;
+        pat_loc = loc; pat_extra=[];
+        pat_type = instance expected_ty;
+        pat_attributes = sp.ppat_attributes;
+        pat_env = !env }
+      in
+      if explode > 0 then
+        let (sp, constrs, labels) =
+          try
+            Parmatch.ppat_of_type !env expected_ty
+          with Parmatch.Empty -> raise (Error (loc, !env, Empty_pattern))
+        in
+        if sp.ppat_desc = Parsetree.Ppat_any then k' Tpat_any else
+        if mode = Inside_or then raise Need_backtrack else
+        let explode =
+          match sp.ppat_desc with
+            Parsetree.Ppat_or _ -> explode - 5
+          | _ -> explode - 1
+        in
+        type_pat ~constrs:(Some constrs) ~labels:(Some labels)
+          ~explode sp expected_ty k
+      else k' Tpat_any
+  | Ppat_var name ->
+      let ty = instance expected_ty in
+      let id = (* PR#7330 *)
+        if name.txt = "*extension*" then
+          Ident.create_local name.txt
+        else
+          enter_variable loc name ty sp.ppat_attributes
+      in
+      rp k {
+        pat_desc = Tpat_var (id, name);
+        pat_loc = loc; pat_extra=[];
+        pat_type = ty;
+        pat_attributes = sp.ppat_attributes;
+        pat_env = !env }
+  | Ppat_structured_name (name, tags) ->
+      let structured_name_inferred_type = 
+        match tags with
+        | Total_single   _ -> 
+            newty (Tarrow(Nolabel, newgenvar(), newgenvar(), Cok))
+        | Partial_single _ -> 
+            newty (Tarrow(Nolabel, newgenvar(), 
+                            Predef.type_option (newgenvar()), Cok))
+        | Total_multi tags_list ->
+            let cases_amount = (List.length tags_list) in
+            let ty_choice = 
+              match List.nth_opt Predef.types_choice cases_amount with
+              | Some(t) -> t
+              | None    -> 
+                  raise(Error(loc, !env, Too_many_tags_for_active_pattern 
+                                                                cases_amount)) 
+            in
+            newty (Tarrow(
+              Nolabel, 
+              newgenvar(), 
+              ty_choice (List.init cases_amount (fun _ -> newgenvar())), Cok))
+      in
+      let ty = instance structured_name_inferred_type in
+      unify_pat_types loc !env ty (instance expected_ty);
+      let name_ident = enter_variable loc name ty sp.ppat_attributes in
+      let tag_idents = 
+        match tags with
+        | Parsetree.Total_single tag -> 
+            Typedtree.Total_single   (enter_active_tag tag ty, tag) 
+        | Parsetree.Partial_single tag -> 
+            Typedtree.Partial_single (enter_active_tag tag ty, tag) 
+        | Parsetree.Total_multi tags -> 
+            Typedtree.Total_multi
+              (List.map (fun tag -> (enter_active_tag tag ty, tag)) tags)
+      in
+      rp k {
+        pat_desc  = Tpat_structured_name (name_ident, name, tag_idents);
+        pat_loc   = loc;
+        pat_extra = [];
+        pat_type  = ty;
+        pat_attributes = sp.ppat_attributes;
+        pat_env   = !env }
+  | Ppat_unpack name ->
+      assert (constrs = None);
+      let t = instance expected_ty in
+      let id = enter_variable loc name t ~is_module:true sp.ppat_attributes in
+      rp k {
+        pat_desc = Tpat_var (id, name);
+        pat_loc = sp.ppat_loc;
+        pat_extra=[Tpat_unpack, loc, sp.ppat_attributes];
+        pat_type = t;
+        pat_attributes = [];
+        pat_env = !env }
+  | Ppat_constraint(
+      {ppat_desc=Ppat_var name; ppat_loc=lloc; ppat_attributes = attrs},
+      ({ptyp_desc=Ptyp_poly _} as sty)) ->
+      (* explicitly polymorphic type *)
+      assert (constrs = None);
+      let cty, force = Typetexp.transl_simple_type_delayed !env sty in
+      let ty = cty.ctyp_type in
+      unify_pat_types lloc !env ty (instance expected_ty);
+      pattern_force := force :: !pattern_force;
+      begin match ty.desc with
+      | Tpoly (body, tyl) ->
+          begin_def ();
+          let _, ty' = instance_poly ~keep_names:true false tyl body in
+          end_def ();
+          generalize ty';
+          let id = enter_variable lloc name ty' attrs in
+          rp k {
+            pat_desc = Tpat_var (id, name);
+            pat_loc = lloc;
+            pat_extra = [Tpat_constraint cty, loc, sp.ppat_attributes];
+            pat_type = ty;
+            pat_attributes = [];
+            pat_env = !env
+          }
+      | _ -> assert false
+      end
+  | Ppat_alias(sq, name) ->
+      assert (constrs = None);
+      type_pat sq expected_ty (fun q ->
+        begin_def ();
+        let ty_var = build_as_type !env q in
+        end_def ();
+        generalize ty_var;
+        let id =
+          enter_variable ~is_as_variable:true loc name ty_var sp.ppat_attributes
+        in
+        rp k {
+          pat_desc = Tpat_alias(q, id, name);
+          pat_loc = loc; pat_extra=[];
+          pat_type = q.pat_type;
+          pat_attributes = sp.ppat_attributes;
+          pat_env = !env })
+  | Ppat_constant cst ->
+      let cst = constant_or_raise !env loc cst in
+      rup k {
+        pat_desc = Tpat_constant cst;
+        pat_loc = loc; pat_extra=[];
+        pat_type = type_constant cst;
+        pat_attributes = sp.ppat_attributes;
+        pat_env = !env }
+  | Ppat_interval (Pconst_char c1, Pconst_char c2) ->
+      let open Ast_helper.Pat in
+      let gloc = {loc with Location.loc_ghost=true} in
+      let rec loop c1 c2 =
+        if c1 = c2 then constant ~loc:gloc (Pconst_char c1)
+        else
+          or_ ~loc:gloc
+            (constant ~loc:gloc (Pconst_char c1))
+            (loop (Char.chr(Char.code c1 + 1)) c2)
+      in
+      let p = if c1 <= c2 then loop c1 c2 else loop c2 c1 in
+      let p = {p with ppat_loc=loc} in
+      type_pat ~explode:0 p expected_ty k
+        (* TODO: record 'extra' to remember about interval *)
+  | Ppat_interval _ ->
+      raise (Error (loc, !env, Invalid_interval))
+  | Ppat_tuple spl ->
+      assert (List.length spl >= 2);
+      let spl_ann = List.map (fun p -> (p,newgenvar ())) spl in
+      let ty = newgenty (Ttuple(List.map snd spl_ann)) in
+      begin_def ();
+      let expected_ty = instance expected_ty in
+      end_def ();
+      generalize_structure expected_ty;
+      unify_pat_types loc !env ty expected_ty;
+      map_fold_cont (fun (p,t) -> type_pat p t) spl_ann (fun pl ->
+        rp k {
+        pat_desc = Tpat_tuple pl;
+        pat_loc = loc; pat_extra=[];
+        pat_type = newty (Ttuple(List.map (fun p -> p.pat_type) pl));
+        pat_attributes = sp.ppat_attributes;
+        pat_env = !env })
+  | Ppat_construct(lid, sarg) ->
+      let opath =
+        try
+          let (p0, p, _) = extract_concrete_variant !env expected_ty in
+            Some (p0, p, true)
+        with Not_found -> None
+      in
+      let candidates =
+        match lid.txt, constrs with
+          Longident.Lident s, Some constrs when Hashtbl.mem constrs s ->
+            [Hashtbl.find constrs s, (fun () -> ())]
+        | _ ->  Typetexp.find_all_constructors !env lid.loc lid.txt
+      in
+      let constr =
+        wrap_disambiguate "This variant pattern is expected to have"
+          (mk_expected expected_ty)
+          (Constructor.disambiguate lid !env opath) candidates
+      in
+      if constr.cstr_generalized && constrs <> None && mode = Inside_or
+      then raise Need_backtrack;
+      Env.mark_constructor Env.Pattern !env (Longident.last lid.txt) constr;
+      Builtin_attributes.check_alerts loc constr.cstr_attributes
+        constr.cstr_name;
+      begin match no_existentials, constr.cstr_existentials with
+      | None, _ | _, [] -> ()
+      | Some r, (_ :: _ as exs)  ->
+          let exs = List.map (Ctype.existential_name constr) exs in
+          let name = constr.cstr_name in
+          raise (Error (loc, !env, Unexpected_existential (r,name, exs)))
+      end;
+      (* if constructor is gadt, we must verify that the expected type has the
+         correct head *)
+      if constr.cstr_generalized then
+        unify_head_only loc !env (instance expected_ty) constr;
+      let sargs =
+        match sarg with
+          None -> []
+        | Some {ppat_desc = Ppat_tuple spl} when
+            constr.cstr_arity > 1 ||
+            Builtin_attributes.explicit_arity sp.ppat_attributes
+          -> spl
+        | Some({ppat_desc = Ppat_any} as sp) when constr.cstr_arity <> 1 ->
+            if constr.cstr_arity = 0 then
+              Location.prerr_warning sp.ppat_loc
+                                     Warnings.Wildcard_arg_to_constant_constr;
+            replicate_list sp constr.cstr_arity
+        | Some sp -> [sp] in
+      if Builtin_attributes.warn_on_literal_pattern constr.cstr_attributes then
+        begin match List.filter has_literal_pattern sargs with
+        | sp :: _ ->
+           Location.prerr_warning sp.ppat_loc Warnings.Fragile_literal_pattern
+        | _ -> ()
+        end;
+      if List.length sargs <> constr.cstr_arity then
+        raise(Error(loc, !env, Constructor_arity_mismatch(lid.txt,
+                                     constr.cstr_arity, List.length sargs)));
+      begin_def ();
+      let (ty_args, ty_res) =
+        instance_constructor ~in_pattern:(env, get_gadt_equations_level ())
+          constr
+      in
+      let expected_ty = instance expected_ty in
+      (* PR#7214: do not use gadt unification for toplevel lets *)
+      if not constr.cstr_generalized || no_existentials <> None
+      then unify_pat_types loc !env ty_res expected_ty
+      else unify_pat_types_gadt loc env ty_res expected_ty;
+      end_def ();
+      generalize_structure expected_ty;
+      generalize_structure ty_res;
+      List.iter generalize_structure ty_args;
+
+      let rec check_non_escaping p =
+        match p.ppat_desc with
+        | Ppat_or (p1, p2) ->
+            check_non_escaping p1;
+            check_non_escaping p2
+        | Ppat_alias (p, _) ->
+            check_non_escaping p
+        | Ppat_constraint _ ->
+            raise (Error (p.ppat_loc, !env, Inlined_record_escape))
+        | _ ->
+            ()
+      in
+      if constr.cstr_inlined <> None then List.iter check_non_escaping sargs;
+
+      map_fold_cont (fun (p,t) -> type_pat p t) (List.combine sargs ty_args)
+      (fun args ->
+        rp k {
+          pat_desc=Tpat_construct(lid, constr, args);
+          pat_loc = loc; pat_extra=[];
+          pat_type = instance expected_ty;
+          pat_attributes = sp.ppat_attributes;
+          pat_env = !env })
+  | Ppat_variant(l, sarg) ->
+      let arg_type = match sarg with None -> [] | Some _ -> [newgenvar()] in
+      let row = { row_fields =
+                    [l, Reither(sarg = None, arg_type, true, ref None)];
+                  row_bound = ();
+                  row_closed = false;
+                  row_more = newgenvar ();
+                  row_fixed = false;
+                  row_name = None } in
+      begin_def ();
+      let expected_ty = instance expected_ty in
+      end_def ();
+      generalize_structure expected_ty;
+      (* PR#7404: allow some_private_tag blindly, as it would not unify with
+         the abstract row variable *)
+      if l = Parmatch.some_private_tag then assert (constrs <> None)
+      else unify_pat_types loc !env (newgenty (Tvariant row)) expected_ty;
+      let k arg =
+        rp k {
+        pat_desc = Tpat_variant(l, arg, ref {row with row_more = newvar()});
+        pat_loc = loc; pat_extra=[];
+        pat_type = instance expected_ty;
+        pat_attributes = sp.ppat_attributes;
+        pat_env = !env }
+      in begin
+        (* PR#6235: propagate type information *)
+        match sarg, arg_type with
+          Some p, [ty] -> type_pat p ty (fun p -> k (Some p))
+        | _            -> k None
+      end
+  | Ppat_parameterized(tag, params, sarg) ->
+      (* <C e1 e2> pat *)
+      let tag_str = 
+        match tag.txt with 
+        | Longident.Lident s -> s 
+        | _ -> assert false
+      in
+      let (path, active_pattern) = 
+        try
+          Env.lookup_value tag.txt !env
+        with Not_found ->
+          raise(Error(tag.loc, !env, Unbound_tag tag_str))
+      in
+      assert (active_pattern.val_kind = Val_active_tag);
+      let arg = type_pat sarg (newgenvar()) Fun.id in
+      let params = List.map (type_exp !env) params in
+      let ty_arg = instance arg.pat_type in
+      let active_pattern_inferred_type = 
+        List.fold_right
+          (fun param acc -> 
+              newty (Tarrow((* TODO *) Nolabel, param.exp_type, acc, Cok)))
+          params
+          (type_option ty_arg)
+      in
+      let ty = instance active_pattern.val_type in
+      unify_exp_types
+        tag.loc !env ty (instance active_pattern_inferred_type);
+      rp k {
+        pat_desc = Tpat_parameterized(tag, path, active_pattern, params, arg);
+        pat_loc = loc; pat_extra=[];
+        pat_type = ty_arg;
+        pat_attributes = sp.ppat_attributes;
+        pat_env = !env };
+  | Ppat_record(lid_sp_list, closed) ->
+      assert (lid_sp_list <> []);
+      let opath, record_ty =
+        try
+          let (p0, p,_) = extract_concrete_record !env expected_ty in
+          begin_def ();
+          let ty = instance expected_ty in
+          end_def ();
+          generalize_structure ty;
+          Some (p0, p, true), ty
+        with Not_found -> None, newvar ()
+      in
+      let type_label_pat (label_lid, label, sarg) k =
+        begin_def ();
+        let (_, ty_arg, ty_res) = instance_label false label in
+        begin try
+          unify_pat_types loc !env ty_res (instance record_ty)
+        with Error(_loc, _env, Pattern_type_clash(trace, _)) ->
+          raise(Error(label_lid.loc, !env,
+                      Label_mismatch(label_lid.txt, trace)))
+        end;
+        end_def ();
+        generalize_structure ty_res;
+        generalize_structure ty_arg;
+        type_pat sarg ty_arg (fun arg ->
+          k (label_lid, label, arg))
+      in
+      let k' k lbl_pat_list =
+        check_recordpat_labels loc lbl_pat_list closed;
+        rup k {
+        pat_desc = Tpat_record (lbl_pat_list, closed);
+        pat_loc = loc; pat_extra=[];
+        pat_type = instance record_ty;
+        pat_attributes = sp.ppat_attributes;
+        pat_env = !env }
+      in
+      if constrs = None then
+        k (wrap_disambiguate "This record pattern is expected to have"
+             (mk_expected expected_ty)
+             (type_label_a_list ?labels loc false !env type_label_pat opath
+                lid_sp_list)
+             (k' (fun x -> x)))
+      else
+        type_label_a_list ?labels loc false !env type_label_pat opath
+          lid_sp_list (k' k)
+  | Ppat_array spl ->
+      let ty_elt = newgenvar() in
+      begin_def ();
+      let expected_ty = instance expected_ty in
+      end_def ();
+      generalize_structure expected_ty;
+      unify_pat_types
+        loc !env (Predef.type_array ty_elt) expected_ty;
+      map_fold_cont (fun p -> type_pat p ty_elt) spl (fun pl ->
+        rp k {
+        pat_desc = Tpat_array pl;
+        pat_loc = loc; pat_extra=[];
+        pat_type = instance expected_ty;
+        pat_attributes = sp.ppat_attributes;
+        pat_env = !env })
+  | Ppat_or(sp1, sp2) ->
+      let state = save_state env in
+      begin match
+        if mode = Split_or || mode = Splitting_or then raise Need_backtrack;
+        let initial_pattern_variables = !pattern_variables in
+        let initial_module_variables = !module_variables in
+        let equation_level = !gadt_equations_level in
+        let outter_lev = get_current_level () in
+        (* introduce a new scope *)
+        begin_def ();
+        let lev = get_current_level () in
+        gadt_equations_level := Some lev;
+        let env1 = ref !env in
+        let p1 =
+          try Some (type_pat ~exception_allowed ~mode:Inside_or sp1 expected_ty
+                      ~env:env1 (fun x -> x))
+          with Need_backtrack -> None in
+        let p1_variables = !pattern_variables in
+        let p1_module_variables = !module_variables in
+        pattern_variables := initial_pattern_variables;
+        module_variables := initial_module_variables;
+        let env2 = ref !env in
+        let p2 =
+          try Some (type_pat ~exception_allowed ~mode:Inside_or sp2 expected_ty
+                      ~env:env2 (fun x -> x))
+          with Need_backtrack -> None in
+        end_def ();
+        gadt_equations_level := equation_level;
+        let p2_variables = !pattern_variables in
+        (* Make sure no variable with an ambiguous type gets added to the
+           environment. *)
+        List.iter (fun { pv_type; pv_loc; _ } ->
+          check_scope_escape pv_loc !env1 outter_lev pv_type
+        ) p1_variables;
+        List.iter (fun { pv_type; pv_loc; _ } ->
+          check_scope_escape pv_loc !env2 outter_lev pv_type
+        ) p2_variables;
+        match p1, p2 with
+          None, None -> raise Need_backtrack
+        | Some p, None | None, Some p -> p (* no variables in this case *)
+        | Some p1, Some p2 ->
+        let alpha_env =
+          enter_orpat_variables loc !env p1_variables p2_variables in
+        pattern_variables := p1_variables;
+        module_variables := p1_module_variables;
+        { pat_desc = Tpat_or(p1, alpha_pat alpha_env p2, None);
+          pat_loc = loc; pat_extra=[];
+          pat_type = instance expected_ty;
+          pat_attributes = sp.ppat_attributes;
+          pat_env = !env }
+      with
+        p -> rp k p
+      | exception Need_backtrack when mode <> Inside_or ->
+          assert (constrs <> None);
+          set_state state env;
+          let mode =
+            if mode = Split_or then mode else Splitting_or in
+          try type_pat ~exception_allowed ~mode sp1 expected_ty k
+          with Error _ ->
+            set_state state env;
+            type_pat ~exception_allowed ~mode sp2 expected_ty k
+      end
+  | Ppat_lazy sp1 ->
+      let nv = newgenvar () in
+      unify_pat_types loc !env (Predef.type_lazy_t nv) expected_ty;
+      (* do not explode under lazy: PR#7421 *)
+      type_pat ~explode:0 sp1 nv (fun p1 ->
+        rp k {
+        pat_desc = Tpat_lazy p1;
+        pat_loc = loc; pat_extra=[];
+        pat_type = instance expected_ty;
+        pat_attributes = sp.ppat_attributes;
+        pat_env = !env })
+  | Ppat_constraint(sp, sty) ->
+      (* Pretend separate = true *)
+      begin_def();
+      let cty, force = Typetexp.transl_simple_type_delayed !env sty in
+      let ty = cty.ctyp_type in
+      end_def();
+      generalize_structure ty;
+      let ty, expected_ty' = instance ty, ty in
+      unify_pat_types loc !env ty (instance expected_ty);
+      type_pat ~exception_allowed sp expected_ty' (fun p ->
+        (*Format.printf "%a@.%a@."
+          Printtyp.raw_type_expr ty
+          Printtyp.raw_type_expr p.pat_type;*)
+        pattern_force := force :: !pattern_force;
+        let extra = (Tpat_constraint cty, loc, sp.ppat_attributes) in
+        let p =
+          match p.pat_desc with
+            Tpat_var (id,s) ->
+              {p with pat_type = ty;
+               pat_desc = Tpat_alias
+                 ({p with pat_desc = Tpat_any; pat_attributes = []}, id,s);
+               pat_extra = [extra];
+             }
+          | _ -> {p with pat_type = ty;
+                  pat_extra = extra :: p.pat_extra}
+        in k p)
+  | Ppat_type lid ->
+      let (path, p,ty) = build_or_pat !env loc lid in
+      unify_pat_types loc !env ty (instance expected_ty);
+      k { p with pat_extra =
+        (Tpat_type (path, lid), loc, sp.ppat_attributes) :: p.pat_extra }
+  | Ppat_open (lid,p) ->
+      let path, new_env =
+        !type_open Asttypes.Fresh !env sp.ppat_loc lid in
+      let new_env = ref new_env in
+      type_pat ~exception_allowed ~env:new_env p expected_ty ( fun p ->
+        env := Env.copy_local !env ~from:!new_env;
+        k { p with pat_extra =( Tpat_open (path,lid,!new_env),
+                            loc, sp.ppat_attributes) :: p.pat_extra }
+      )
+  | Ppat_exception p ->
+      if not exception_allowed then
+        raise (Error (loc, !env, Exception_pattern_disallowed))
+      else begin
+        let p_exn = type_pat p Predef.type_exn k in
+        rp k {
+          pat_desc = Tpat_exception p_exn;
+          pat_loc = sp.ppat_loc;
+          pat_extra = [];
+          pat_type = expected_ty;
+          pat_env = !env;
+          pat_attributes = sp.ppat_attributes;
+        }
+      end
+  | Ppat_extension ext ->
+      raise (Error_forward (Builtin_attributes.error_of_extension ext))
+
+and type_pat ?exception_allowed ?no_existentials ?constrs ?labels ?(mode=Normal)
+    ?(explode=0) ?(lev=get_current_level()) env sp expected_ty =
+  Misc.protect_refs [Misc.R (gadt_equations_level, Some lev)] (fun () ->
+      let r =
+        type_pat_ ?exception_allowed ~no_existentials ~constrs ~labels ~mode
+          ~explode ~env sp expected_ty (fun x -> x)
+      in
+      iter_pattern (fun p -> p.pat_env <- !env) r;
+      r
+    )
+
+(* this function is passed to Partial.parmatch
+   to type check gadt nonexhaustiveness *)
+and partial_pred ~lev ?mode ?explode env expected_ty constrs labels p =
+  let env = ref env in
+  let state = save_state env in
+  try
+    reset_pattern None true;
+    let typed_p =
+      Ctype.with_passive_variants
+        (type_pat ~lev ~constrs ~labels ?mode ?explode env p)
+        expected_ty
+    in
+    set_state state env;
+    (* types are invalidated but we don't need them here *)
+    Some typed_p
+  with Error _ ->
+    set_state state env;
+    None
+
+and check_partial ?(lev=get_current_level ()) env expected_ty loc cases =
+  let explode = match cases with [_] -> 5 | _ -> 0 in
+  Parmatch.check_partial
+    (partial_pred ~lev ~explode env expected_ty) loc cases
+
+and check_unused ?(lev=get_current_level ()) env expected_ty cases =
+  Parmatch.check_unused
+    (fun refute constrs labels spat ->
+      match
+        partial_pred ~lev ~mode:Split_or ~explode:5
+          env expected_ty constrs labels spat
+      with
+        Some pat when refute ->
+          raise (Error (spat.ppat_loc, env, Unrefuted_pattern pat))
+      | r -> r)
+    cases
+
+and iter_pattern_variables_type f : pattern_variable list -> unit =
+  List.iter (fun {pv_type; _} -> f pv_type)
+
+and add_pattern_variables ?check ?check_as pv env =
+  List.fold_right
+    (fun {pv_id; pv_type; pv_loc; pv_as_var; pv_attributes} env ->
+       let check = if pv_as_var then check_as else check in
+       Env.add_value ?check pv_id
+         {val_type = pv_type; val_kind = Val_reg; Types.val_loc = pv_loc;
+          val_attributes = pv_attributes;
+         } env
+    )
+    pv 
+    env
+
+and add_active_tags ?check tags env =
+  List.fold_right
+    (fun {at_id; at_type; at_loc} env ->
+       Env.add_value ?check at_id
+         {val_type = at_type; val_kind = Val_active_tag; Types.val_loc = at_loc;
+          val_attributes = [];
+         } 
+         env
+    )
+    tags 
+    env
+
+and type_pattern ?exception_allowed ~lev env spat scope expected_ty =
+  reset_pattern scope true;
+  let new_env = ref env in
+  let pat = type_pat ?exception_allowed ~lev new_env spat expected_ty in
+  let pvs = get_ref pattern_variables in
+  let unpacks = get_ref module_variables in
+  let active_tags = get_ref active_tags in
+  (pat, !new_env, get_ref pattern_force, pvs, unpacks, active_tags)
+
+and type_pattern_list no_existentials env spatl scope expected_tys allow =
+  reset_pattern scope allow;
+  let new_env = ref env in
+  let type_pat (attrs, pat) ty =
+    Builtin_attributes.warning_scope ~ppwarning:false attrs
+      (fun () ->
+         type_pat ~no_existentials new_env pat ty
+      )
+  in
+  let patl = List.map2 type_pat spatl expected_tys in
+  let pvs = get_ref pattern_variables in
+  let unpacks = get_ref module_variables in
+  let active_tags = get_ref active_tags in
+  let new_env = 
+    !new_env
+    |> add_pattern_variables pvs
+    |> add_active_tags       active_tags
+  in
+  (patl, new_env, get_ref pattern_force, pvs, unpacks, active_tags)
+
+and type_class_arg_pattern cl_num val_env met_env l spat =
+  reset_pattern None false;
+  let nv = newvar () in
+  let pat = type_pat ~no_existentials:In_class_args (ref val_env) spat nv in
+  if has_variants pat then begin
+    Parmatch.pressure_variants val_env [pat];
+    iter_pattern finalize_variant pat
+  end;
+  List.iter (fun f -> f()) (get_ref pattern_force);
+  if is_optional l then unify_pat val_env pat (type_option (newvar ()));
+  let (pv, met_env) =
+    List.fold_right
+      (fun {pv_id; pv_type; pv_loc; pv_as_var; pv_attributes} (pv, env) ->
+         let check s =
+           if pv_as_var then Warnings.Unused_var s
+           else Warnings.Unused_var_strict s in
+         let id' = Ident.create_local (Ident.name pv_id) in
+         ((id', pv_id, pv_type)::pv,
+          Env.add_value id' {val_type = pv_type;
+                             val_kind = Val_ivar (Immutable, cl_num);
+                             val_attributes = pv_attributes;
+                             Types.val_loc = pv_loc;
+                            } ~check
+            env))
+      !pattern_variables ([], met_env)
+  in
+  let val_env = 
+    val_env
+    |> add_pattern_variables (get_ref pattern_variables)
+    |> add_active_tags       (get_ref active_tags)
+  in
+  (pat, pv, val_env, met_env)
+
+and type_self_pattern cl_num privty val_env met_env par_env spat =
+  let open Ast_helper in
+  let spat =
+    Pat.mk (Ppat_alias (Pat.mk(Ppat_alias (spat, mknoloc "selfpat-*")),
+                        mknoloc ("selfpat-" ^ cl_num)))
+  in
+  reset_pattern None false;
+  let nv = newvar() in
+  let pat = type_pat ~no_existentials:In_self_pattern (ref val_env) spat nv in
+  List.iter (fun f -> f()) (get_ref pattern_force);
+  let meths = ref Meths.empty in
+  let vars = ref Vars.empty in
+  let pv = !pattern_variables in
+  pattern_variables := [];
+  let (val_env, met_env, par_env) =
+    List.fold_right
+      (fun {pv_id; pv_type; pv_loc; pv_as_var; pv_attributes}
+           (val_env, met_env, par_env) ->
+         (Env.add_value pv_id {val_type = pv_type;
+                               val_kind =
+                                 Val_unbound Val_unbound_instance_variable;
+                               val_attributes = pv_attributes;
+                               Types.val_loc = pv_loc;
+                              } val_env,
+          Env.add_value pv_id {val_type = pv_type;
+                               val_kind =
+                                 Val_self (meths, vars, cl_num, privty);
+                               val_attributes = pv_attributes;
+                               Types.val_loc = pv_loc;
+                              }
+            ~check:(fun s -> if pv_as_var then Warnings.Unused_var s
+                             else Warnings.Unused_var_strict s)
+            met_env,
+          Env.add_value pv_id {val_type = pv_type;
+                               val_kind =
+                                 Val_unbound Val_unbound_instance_variable;
+                               val_attributes = pv_attributes;
+                               Types.val_loc = pv_loc;
+                              } par_env))
+      pv (val_env, met_env, par_env)
+  in
+  (pat, meths, vars, val_env, met_env, par_env)    
+
 (* Typing of match cases *)
+
 and type_cases ?exception_allowed ?in_function env ty_arg ty_res partial_flag
       loc caselist =
   (* ty_arg is _fully_ generalized *)
@@ -4308,7 +4454,7 @@ and type_cases ?exception_allowed ?in_function env ty_arg ty_res partial_flag
         let ty_arg = instance ?partial:take_partial_instance ty_arg in
         end_def ();
         generalize_structure ty_arg;
-        let (pat, ext_env, force, pvs, unpacks) =
+        let (pat, ext_env, force, pvs, unpacks, active_tags) =
           type_pattern ?exception_allowed ~lev env pc_lhs scope ty_arg
         in
         pattern_force := force @ !pattern_force;
@@ -4327,6 +4473,7 @@ and type_cases ?exception_allowed ?in_function env ty_arg ty_res partial_flag
           branch_env = ext_env;
           pat_vars = pvs;
           unpacks;
+          active_tags;
           contains_gadt = contains_gadt pat; }
         )
       caselist in
@@ -4369,7 +4516,7 @@ and type_cases ?exception_allowed ?in_function env ty_arg ty_res partial_flag
   let cases =
     List.map
       (fun { typed_pat = pat; branch_env = ext_env; pat_vars = pvs; unpacks;
-             untyped_case = {pc_lhs = _; pc_guard; pc_rhs};
+             active_tags; untyped_case = {pc_lhs = _; pc_guard; pc_rhs};
              contains_gadt; _ }  ->
         let ext_env =
           if contains_gadt then
@@ -4378,9 +4525,13 @@ and type_cases ?exception_allowed ?in_function env ty_arg ty_res partial_flag
             ext_env
         in
         let ext_env =
-          add_pattern_variables ext_env pvs
+          add_pattern_variables pvs ext_env
             ~check:(fun s -> Warnings.Unused_var_strict s)
             ~check_as:(fun s -> Warnings.Unused_var s)
+        in
+        let ext_env =
+          add_active_tags active_tags ext_env
+            ~check:(fun s -> Warnings.Unused_var_strict s)
         in
         let sexp = wrap_unpacks pc_rhs unpacks in
         let ty_res' =
@@ -4498,7 +4649,7 @@ and type_let
         | _ -> spat)
       spat_sexp_list in
   let nvs = List.map (fun _ -> newvar ()) spatl in
-  let (pat_list, new_env, force, pvs, unpacks) =
+  let (pat_list, new_env, force, pvs, unpacks, _) =
     type_pattern_list existential_context env spatl scope nvs allow in
   let attrs_list = List.map fst spatl in
   let is_recursive = (rec_flag = Recursive) in
@@ -4891,6 +5042,12 @@ let report_unification_error ~loc ?sub env trace
   ) ()
 
 let report_error ~loc env = function
+  | Too_many_tags_for_active_pattern tags_amount ->
+      Location.errorf ~loc
+        "@[Too many tags (%i) for active pattern,@ \
+          only %i is supported at the moment@]"
+        tags_amount
+        (32)
   | Constructor_arity_mismatch(lid, expected, provided) ->
       Location.errorf ~loc
        "@[The constructor %a@ expects %i argument(s),@ \
@@ -4924,6 +5081,10 @@ let report_error ~loc env = function
   | Multiply_bound_variable name ->
       Location.errorf ~loc
         "Variable %s is bound several times in this matching"
+        name
+  | Multiply_bound_active_tag name ->
+      Location.errorf ~loc
+        "Active pattern tag %s is bound several times in this matching"
         name
   | Orpat_vars (id, valid_idents) ->
       Location.error_of_printer ~loc (fun ppf () ->
@@ -5038,6 +5199,8 @@ let report_error ~loc env = function
         fprintf ppf "Unbound instance variable %s" var;
         spellcheck ppf var valid_vars;
       ) ()
+  | Unbound_tag tag ->
+      Location.errorf ~loc "Unbound active pattern tag %s" tag
   | Instance_variable_not_mutable (b, v) ->
       if b then
         Location.errorf ~loc "The instance variable %s is not mutable" v

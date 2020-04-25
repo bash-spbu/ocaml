@@ -244,6 +244,8 @@ and pattern i ppf x =
   match x.pat_desc with
   | Tpat_any -> line i ppf "Tpat_any\n";
   | Tpat_var (s,_) -> line i ppf "Tpat_var \"%a\"\n" fmt_ident s;
+  | Tpat_structured_name (li, _, _) -> 
+      line i ppf "Tpat_structured_name \"%a\"\n" fmt_ident li;
   | Tpat_alias (p, s,_) ->
       line i ppf "Tpat_alias \"%a\"\n" fmt_ident s;
       pattern i ppf p;
@@ -254,6 +256,13 @@ and pattern i ppf x =
   | Tpat_construct (li, _, po) ->
       line i ppf "Tpat_construct %a\n" fmt_longident li;
       list i pattern ppf po;
+  | Tpat_active (li, _, _, pl) ->
+      line i ppf "Tpat_active %a\n" fmt_longident li;
+      list i pattern ppf pl;
+  | Tpat_parameterized(li, _, _, exprs, pat) ->
+      line i ppf "Tpat_parameterized %a\n" fmt_longident li;
+      list i expression ppf exprs;
+      pattern i ppf pat;
   | Tpat_variant (l, po, _) ->
       line i ppf "Tpat_variant \"%s\"\n" l;
       option i pattern ppf po;

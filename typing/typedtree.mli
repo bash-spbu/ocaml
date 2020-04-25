@@ -67,6 +67,12 @@ and pattern_desc =
         (** _ *)
   | Tpat_var of Ident.t * string loc
         (** x *)
+  | Tpat_structured_name of Ident.t * string loc * structured_name_tags_idents
+        (** Active pattern structured name: 
+            (|C|)
+            (|C_1|...|C_n|)    what is needed for typing 
+            (|C_1|_|)
+          *)
   | Tpat_alias of pattern * Ident.t * string loc
         (** P as a *)
   | Tpat_constant of constant
@@ -81,6 +87,28 @@ and pattern_desc =
         (** C                []
             C P              [P]
             C (P1, ..., Pn)  [P1; ...; Pn]
+          *)
+  | Tpat_active of 
+      Longident.t loc * Path.t * Types.value_description * pattern list
+        (** C P              [P]
+            C (P1, ..., Pm)  [P1; ...; Pm]
+            
+            where C is a tag of some active pattern, i.e. belongs to some
+            structured name (|C1|...|C|...|Cn|)
+
+            Invariant: [Types.value_description.val_kind = Val_active_tag]
+          *)
+  | Tpat_parameterized of
+      Longident.t loc * Path.t * Types.value_description * expression list 
+        * pattern
+        (** <C E1 ... En> P  [E1; ...; En]  P
+            
+            where C is a tag of some partial active pattern with parameters,
+            e.g.
+            let (|C|_|) e_1 ... e_m p = ...
+
+            Invariant: m >= 1
+                    && [Types.value_description.val_kind = Val_active_tag]
           *)
   | Tpat_variant of label * pattern option * row_desc ref
         (** `A             (None)
@@ -108,6 +136,13 @@ and pattern_desc =
         (** lazy P *)
   | Tpat_exception of pattern
         (** exception P *)
+
+(** Same as [Parsetree.structured_name_tags] 
+    but with [Ident.t] added for each tag *)
+and structured_name_tags_idents =
+  | Total_single   of Ident.t * string loc         (* (|C|)           *)
+  | Partial_single of Ident.t * string loc         (* (|C|_|)         *)
+  | Total_multi    of (Ident.t * string loc) list  (* (|C1|...|Cn|)   *)
 
 and expression =
   { exp_desc: expression_desc;

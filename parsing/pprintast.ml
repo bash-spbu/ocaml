@@ -236,12 +236,6 @@ let constant f = function
   | Pconst_float (i, Some m) ->
       paren (first_is '-' i) (fun f (i,m) -> pp f "%s%c" i m) f (i,m)
 
-let structured_name f = function
-  | Total_single   id -> string_loc f id
-  | Partial_single id -> pp f "%a|_" string_loc id
-  | Total_multi   ids -> list string_loc ~sep:"|" f ids
-  | Partial_multi ids -> list string_loc ~sep:"|" ~last:"_" f ids
-
 (* trailing space*)
 let mutable_flag f = function
   | Immutable -> ()
@@ -453,7 +447,13 @@ and simple_pattern ctxt (f:Format.formatter) (x:pattern) : unit =
           (pattern1 ctxt) p
     | Ppat_any -> pp f "_";
     | Ppat_var ({txt = txt;_}) -> protect_ident f txt
-    | Ppat_structured_name sn -> pp f "@[<2>(|%a|)@]" structured_name sn
+    | Ppat_structured_name (_, tags) -> 
+        pp f "@[<2>(|%a|)@]"
+          (fun f -> function
+          | Total_single   id -> string_loc f id
+          | Partial_single id -> pp f "%a|_" string_loc id
+          | Total_multi   ids -> list string_loc ~sep:"|" f ids)
+          tags
     | Ppat_array l ->
         pp f "@[<2>[|%a|]@]"  (list (pattern1 ctxt) ~sep:";") l
     | Ppat_unpack (s) ->

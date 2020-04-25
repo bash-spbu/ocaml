@@ -547,6 +547,12 @@ let mk_directive ~loc name arg =
       pdir_loc = make_loc loc;
     }
 
+let structured_name_to_ident = function
+  | Total_single   tag  -> "(|" ^ tag.txt ^ "|)"
+  | Partial_single tag  -> "(|" ^ tag.txt ^ "|_|)"
+  | Total_multi    tags -> 
+      "(|" ^ (String.concat "|" (List.map (fun t -> t.txt) tags)) ^ "|)"
+
 %}
 
 /* Tokens */
@@ -739,7 +745,7 @@ The precedences must be listed from low to high.
 %nonassoc BACKQUOTE BANG BEGIN CHAR FALSE FLOAT INT
           LBRACE LBRACELESS LBRACKET LBRACKETBAR LIDENT LPAREN
           NEW PREFIXOP STRING TRUE UIDENT
-          LBRACKETPERCENT
+          LBRACKETPERCENT LPARENBAR
 
 
 /* Entry points */
@@ -2233,7 +2239,7 @@ simple_expr:
       { unclosed "(" $loc($1) ")" $loc($6) }
 ;
 %inline simple_expr_:
-  | mkrhs(val_longident)
+  | mkrhs(val_longident_or_structured_name)
       { Pexp_ident ($1) }
   | constant
       { Pexp_constant $1 }
@@ -2674,10 +2680,7 @@ simple_delimited_pattern:
       { Ppat_array [] }
     | LBRACKETBAR pattern_semi_list error
       { unclosed "[|" $loc($1) "|]" $loc($3) }
-    | LPARENBAR structured_name_tags BARRPAREN
-      { Ppat_structured_name($2) }
-    | LPARENBAR structured_name_tags error
-      { unclosed "(|" $loc($1) "|)" $loc($3) }
+    | structured_name { $1 }
   ) { $1 }
 
 pattern_comma_list(self):
@@ -2713,15 +2716,20 @@ pattern_comma_list(self):
     }
 ;
 
+structured_name:
+  | LPARENBAR structured_name_tags BARRPAREN
+    { Ppat_structured_name(
+        mkloc (structured_name_to_ident $2) (make_loc $loc), $2) }
+  | LPARENBAR structured_name_tags error
+    { unclosed "(|" $loc($1) "|)" $loc($3) }
+
 structured_name_tags:
   | mkrhs(UIDENT)  
       { Total_single   $1 }
   | mkrhs(UIDENT) BAR UNDERSCORE
       { Partial_single $1 }
   | separated_nontrivial_llist(BAR, mkrhs(UIDENT))
-      { Total_multi    $1 }
-  | separated_nontrivial_llist(BAR, mkrhs(UIDENT)) BAR UNDERSCORE 
-      { Partial_multi  $1 }       
+      { Total_multi    $1 }       
     (* "_" can occur only as the last element of the structured name *)
   | UNDERSCORE error { not_expecting $loc($1) "_" }
 
@@ -2731,7 +2739,7 @@ value_description:
   VAL
   ext = ext
   attrs1 = attributes
-  id = mkrhs(val_ident)
+  id = mkrhs(val_ident_or_structured_name)
   COLON
   ty = core_type
   attrs2 = post_item_attributes
@@ -3373,6 +3381,12 @@ val_ident:
   | LPAREN error              { expecting $loc($2) "operator" }
   | LPAREN MODULE error       { expecting $loc($3) "module-expr" }
 ;
+val_ident_or_structured_name:
+    val_ident                 { $1 }
+  | structured_name           { match $1 with
+                                | Ppat_structured_name(str, _) -> str.txt
+                                | _ -> assert false }
+;
 operator:
     PREFIXOP                                    { $1 }
   | LETOP                                       { $1 }
@@ -3421,6 +3435,10 @@ constr_ident:
 val_longident:
     val_ident                                   { Lident $1 }
   | mod_longident DOT val_ident                 { Ldot($1, $3) }
+;
+val_longident_or_structured_name:
+    val_ident_or_structured_name                   { Lident $1 }
+  | mod_longident DOT val_ident_or_structured_name { Ldot($1, $3) }
 ;
 constr_longident:
     mod_longident       %prec below_DOT         { $1 }

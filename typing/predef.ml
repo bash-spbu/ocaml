@@ -28,6 +28,8 @@ let wrap create s =
 
 let ident_create = wrap Ident.create_predef
 
+let choice_amount = 30 (* From 2 to 32 *)
+
 let ident_int = ident_create "int"
 and ident_char = ident_create "char"
 and ident_bytes = ident_create "bytes"
@@ -45,6 +47,10 @@ and ident_lazy_t = ident_create "lazy_t"
 and ident_string = ident_create "string"
 and ident_extension_constructor = ident_create "extension_constructor"
 and ident_floatarray = ident_create "floatarray"
+and idents_choice = 
+  List.init 
+    choice_amount 
+    (fun i -> ident_create ("choice" ^ string_of_int (i + 2)))
 
 let path_int = Pident ident_int
 and path_char = Pident ident_char
@@ -63,6 +69,8 @@ and path_lazy_t = Pident ident_lazy_t
 and path_string = Pident ident_string
 and path_extension_constructor = Pident ident_extension_constructor
 and path_floatarray = Pident ident_floatarray
+and paths_choice = 
+  List.map (fun ident -> Pident ident) idents_choice
 
 let type_int = newgenty (Tconstr(path_int, [], ref Mnil))
 and type_char = newgenty (Tconstr(path_char, [], ref Mnil))
@@ -82,6 +90,14 @@ and type_string = newgenty (Tconstr(path_string, [], ref Mnil))
 and type_extension_constructor =
       newgenty (Tconstr(path_extension_constructor, [], ref Mnil))
 and type_floatarray = newgenty (Tconstr(path_floatarray, [], ref Mnil))
+and types_choice = 
+  List.map2
+    (fun size path -> 
+      fun ty_args -> 
+        assert(List.length ty_args = size); 
+        newgenty (Tconstr(path, ty_args, ref Mnil)))
+    (List.init choice_amount (fun i -> i + 2))
+    paths_choice
 
 let ident_match_failure = ident_create "Match_failure"
 and ident_out_of_memory = ident_create "Out_of_memory"
@@ -149,6 +165,14 @@ and ident_nil = ident_create "[]"
 and ident_cons = ident_create "::"
 and ident_none = ident_create "None"
 and ident_some = ident_create "Some"
+and idents_choice_cstrs =
+  List.init
+    choice_amount
+    (fun i -> 
+      List.init 
+        (i + 2)
+        (fun j -> ident_create (Printf.sprintf "Choice%d_%d" (i + 2) (j + 1))))
+
 let common_initial_env add_type add_extension empty_env =
   let decl_bool =
     {decl_abstr with
@@ -188,6 +212,17 @@ let common_initial_env add_type add_extension empty_env =
      type_params = [tvar];
      type_arity = 1;
      type_variance = [Variance.covariant]}
+  and decls_choice = 
+    List.map
+      (fun cstrs -> 
+        let tvars = List.map (fun _ -> newgenvar()) cstrs in
+        {decl_abstr with
+         type_params = tvars;
+         type_arity = List.length cstrs;
+         type_kind = Type_variant
+                       (List.map2 (fun c tv -> cstr c [tv]) cstrs tvars);
+         type_variance = [Variance.covariant]})
+      idents_choice_cstrs
   in
 
   let add_extension id l =
@@ -233,7 +268,14 @@ let common_initial_env add_type add_extension empty_env =
   add_type ident_int decl_abstr_imm (
   add_type ident_extension_constructor decl_abstr (
   add_type ident_floatarray decl_abstr (
-    empty_env))))))))))))))))))))))))))))
+  (fun env -> 
+    List.fold_left2
+      (fun env ident decl -> add_type ident decl env) 
+      env
+      idents_choice
+      decls_choice)
+          
+  empty_env))))))))))))))))))))))))))))
 
 let build_initial_env add_type add_exception empty_env =
   let common = common_initial_env add_type add_exception empty_env in
