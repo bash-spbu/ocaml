@@ -139,7 +139,7 @@ let rec push_defaults loc bindings cases partial =
              cases, partial) }
       in
       push_defaults loc bindings
-        [{c_lhs={pat with pat_desc = Tpat_var (param, mknoloc name)};
+        [{c_lhs={pat with pat_desc = Tpat_var(param, mknoloc name, Tvar_plain)};
           c_guard=None; c_rhs=exp}]
         Total
   | _ ->
@@ -191,7 +191,7 @@ let rec cut n l =
 
 let rec iter_exn_names f pat =
   match pat.pat_desc with
-  | Tpat_var (id, _) -> f id
+  | Tpat_var (id, _, _) -> f id
   | Tpat_alias (p, id, _) ->
       f id;
       iter_exn_names f p
@@ -773,7 +773,7 @@ and transl_let rec_flag pat_expr_list =
       let idlist =
         List.map
           (fun {vb_pat=pat} -> match pat.pat_desc with
-              Tpat_var (id,_) -> id
+              Tpat_var (id,_,_) -> id
             | Tpat_alias ({pat_desc=Tpat_any}, id,_) -> id
             | _ -> assert false)
         pat_expr_list in

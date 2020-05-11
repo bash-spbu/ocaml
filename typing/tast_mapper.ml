@@ -210,16 +210,13 @@ let pat sub x =
     match x.pat_desc with
     | Tpat_any
     | Tpat_var _
-    | Tpat_structured_name _
     | Tpat_constant _ as d -> d
     | Tpat_tuple l -> Tpat_tuple (List.map (sub.pat sub) l)
     | Tpat_construct (loc, cd, l) ->
         Tpat_construct (loc, cd, List.map (sub.pat sub) l)
-    | Tpat_active (li, path, value, pl) ->
-        Tpat_active (li, path, value, List.map (sub.pat sub) pl)
-    | Tpat_parameterized (li, path, value, exprs, p) ->
-        Tpat_parameterized (li, path, value, 
-          List.map (sub.expr sub) exprs, sub.pat sub p)
+    | Tpat_active (li, path, value, exprs, pl) ->
+        Tpat_active (li, path, value, 
+          List.map (sub.expr sub) exprs, List.map (sub.pat sub) pl)
     | Tpat_variant (l, po, rd) -> Tpat_variant (l, opt (sub.pat sub) po, rd)
     | Tpat_record (l, closed) ->
         Tpat_record (List.map (tuple3 id id (sub.pat sub)) l, closed)

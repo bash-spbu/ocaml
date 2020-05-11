@@ -301,8 +301,8 @@ let pattern sub pat =
   let attrs = sub.attributes sub pat.pat_attributes in
   let desc =
   match pat with
-      { pat_extra=[Tpat_unpack, _, _attrs]; pat_desc = Tpat_var (_,name); _ } ->
-        Ppat_unpack name
+      { pat_extra=[Tpat_unpack, _, _attrs]; pat_desc = Tpat_var (_,name,_); _ } 
+        -> Ppat_unpack name
     | { pat_extra=[Tpat_type (_path, lid), _, _attrs]; _ } ->
         Ppat_type (map_loc sub lid)
     | { pat_extra= (Tpat_constraint ct, _, _attrs) :: rem; _ } ->
@@ -311,22 +311,22 @@ let pattern sub pat =
     | _ ->
     match pat.pat_desc with
       Tpat_any -> Ppat_any
-    | Tpat_var (id, name) ->
+    | Tpat_var (id, name, kind) ->
         begin
           match (Ident.name id).[0] with
             'A'..'Z' ->
               Ppat_unpack name
           | _ ->
-              Ppat_var name
+              begin match kind with
+              | Tvar_plain -> Ppat_var name
+              | Tvar_total_single (_, tag) -> 
+                  Ppat_structured_name(name, Total_single tag)
+              | Tvar_partial_single (_, tag) -> 
+                  Ppat_structured_name(name, Partial_single tag)
+              | Tvar_total_multi tags -> 
+                  Ppat_structured_name(name, Total_multi (List.map snd tags))
+              end
         end
-    | Tpat_structured_name (_, name, tag_ids) ->
-        Ppat_structured_name(
-          name, 
-          match tag_ids with
-          | Typedtree.Total_single   (_, tag) -> Parsetree.Total_single   tag
-          | Typedtree.Partial_single (_, tag) -> Parsetree.Partial_single tag
-          | Typedtree.Total_multi tags -> 
-              Parsetree.Total_multi (List.map snd tags))
 
     (* We transform (_ as x) in x if _ and x have the same location.
        The compiler transforms (x:t) into (_ as x : t).
@@ -341,19 +341,20 @@ let pattern sub pat =
     | Tpat_constant cst -> Ppat_constant (constant cst)
     | Tpat_tuple list ->
         Ppat_tuple (List.map (sub.pat sub) list)
-    | Tpat_construct (lid, _, args) | Tpat_active (lid, _, _, args) ->
-        Ppat_construct (map_loc sub lid,
-          (match args with
-              [] -> None
-            | [arg] -> Some (sub.pat sub arg)
-            | args ->
-                Some
-                  (Pat.tuple ~loc
-                     (List.map (sub.pat sub) args)
-                  )
-          ))
-    | Tpat_parameterized (lid, _, _, exprs, pat) ->
-        Ppat_parameterized (lid, List.map (sub.expr sub) exprs, sub.pat sub pat)
+    | Tpat_construct (lid, _, args) | Tpat_active (lid, _, _, _, args) as pat ->
+        let mapped_args = 
+          match args with
+          | []    -> None
+          | [arg] -> Some (sub.pat sub arg)
+          | args  -> Some (Pat.tuple ~loc (List.map (sub.pat sub) args))
+        in
+        begin match pat with
+        | Tpat_construct _ -> Ppat_construct (map_loc sub lid, mapped_args)
+        | Tpat_active (_, _, _, exprs, _) ->
+            Ppat_parameterized 
+              (map_loc sub lid, List.map (sub.expr sub) exprs, mapped_args)
+        | _ -> assert false
+        end
     | Tpat_variant (label, pato, _) ->
         Ppat_variant (label, map_opt (sub.pat sub) pato)
     | Tpat_record (list, closed) ->

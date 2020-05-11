@@ -481,9 +481,10 @@ type module_variable =
 
 type active_tag =
   {
-    at_id: Ident.t;
-    at_type: type_expr; (* type of the whole active pattern *)
-    at_loc: Location.t;
+    at_id   : Ident.t;
+    at_desc : active_tag_kind;
+    at_type : type_expr;               (* type of the whole active pattern *)
+    at_loc  : Location.t;
   }
 
 let pattern_variables = ref ([] : pattern_variable list)
@@ -579,13 +580,14 @@ let enter_orpat_variables loc env  p1_vs p2_vs =
           raise (Error (loc, env, err)) in
   unify_vars p1_vs p2_vs
 
-let enter_active_tag tag ty =
+let enter_active_tag tag ty tag_description =
   if List.exists (fun {at_id; _} -> Ident.name at_id = tag.txt) !active_tags
   then
     raise(Error(tag.loc, Env.empty, Multiply_bound_active_tag tag.txt));
   let id = Ident.create_local tag.txt in
   active_tags :=
     {at_id   = id;
+     at_desc = tag_description;
      at_type = ty;
      at_loc  = tag.loc} :: !active_tags;
   id
@@ -604,11 +606,10 @@ let rec build_as_type env p =
       List.iter2 (fun (p,ty) -> unify_pat env {p with pat_type = ty})
         (List.combine pl tyl) ty_args;
       ty_res
-  (* | Tpat_active(_tag, _path, _active_pat, _args) -> 
+  | Tpat_active _ -> 
       (* TODO *)
-      assert false *)
-  | Tpat_parameterized(tag, _, active_pat, params, arg) -> 
-      let ty_arg = build_as_type env arg in
+      p.pat_type
+      (* let ty_arg = build_as_type env arg in
       let active_pattern_inferred_type = 
         List.fold_right
           (fun param acc -> 
@@ -619,7 +620,7 @@ let rec build_as_type env p =
       let ty = instance active_pat.val_type in
       unify_exp_types
         tag.loc env ty (instance active_pattern_inferred_type);
-      ty_arg
+      ty_arg *)
   | Tpat_variant(l, p', _) ->
       let ty = may_map (build_as_type env) p' in
       newty (Tvariant{row_fields=[l, Rpresent ty]; row_more=newvar();
@@ -656,7 +657,7 @@ let rec build_as_type env p =
           let row = row_repr row in
           newty (Tvariant{row with row_closed=false; row_more=newvar()})
       end
-  | Tpat_any | Tpat_var _ | Tpat_constant _ | Tpat_structured_name _
+  | Tpat_any | Tpat_var _ | Tpat_constant _
   | Tpat_array _ | Tpat_lazy _ | Tpat_exception _ -> p.pat_type
 
 let build_or_pat env loc lid =
@@ -1135,6 +1136,7 @@ let rec has_literal_pattern p = match p.ppat_desc with
   | Ppat_structured_name _
   | Ppat_variant (_, None)
   | Ppat_construct (_, None)
+  | Ppat_parameterized (_, _, None)
   | Ppat_type _
   | Ppat_var _
   | Ppat_unpack _
@@ -1143,7 +1145,7 @@ let rec has_literal_pattern p = match p.ppat_desc with
   | Ppat_exception p
   | Ppat_variant (_, Some p)
   | Ppat_construct (_, Some p)
-  | Ppat_parameterized (_, _, p)
+  | Ppat_parameterized (_, _, Some p)
   | Ppat_constraint (p, _)
   | Ppat_alias (p, _)
   | Ppat_lazy p
@@ -1580,9 +1582,10 @@ let iter_ppat f p =
   | Ppat_type _ | Ppat_unpack _ -> ()
   | Ppat_array pats -> List.iter f pats
   | Ppat_or (p1,p2) -> f p1; f p2
-  | Ppat_variant (_, arg) | Ppat_construct (_, arg) -> may f arg
+  | Ppat_variant (_, arg) 
+  | Ppat_construct (_, arg)
+  | Ppat_parameterized (_, _, arg) -> may f arg
   | Ppat_tuple lst ->  List.iter f lst
-  | Ppat_parameterized (_, _, p)
   | Ppat_exception p | Ppat_alias (p,_)
   | Ppat_open (_,p)
   | Ppat_constraint (p,_) | Ppat_lazy p -> f p
@@ -1674,7 +1677,7 @@ let rec name_pattern default = function
     [] -> Ident.create_local default
   | p :: rem ->
     match p.pat_desc with
-      Tpat_var (id, _) -> id
+      Tpat_var (id, _, _) -> id
     | Tpat_alias(_, id, _) -> id
     | _ -> name_pattern default rem
 
@@ -3331,7 +3334,9 @@ and type_argument ?explanation ?recarg env sarg ty_expected' ty_expected =
             Types.val_loc = Location.none}
         in
         let exp_env = Env.add_value id desc env in
-        {pat_desc = Tpat_var (id, mknoloc name); pat_type = ty;pat_extra=[];
+        {pat_desc = Tpat_var (id, mknoloc name, Tvar_plain); 
+         pat_type = ty;
+         pat_extra=[];
          pat_attributes = [];
          pat_loc = Location.none; pat_env = env},
         {exp_type = ty; exp_loc = Location.none; exp_env = exp_env;
@@ -3737,13 +3742,13 @@ and type_pat_aux ~exception_allowed ~constrs ~labels ~no_existentials ~mode
           enter_variable loc name ty sp.ppat_attributes
       in
       rp k {
-        pat_desc = Tpat_var (id, name);
+        pat_desc = Tpat_var (id, name, Tvar_plain);
         pat_loc = loc; pat_extra=[];
         pat_type = ty;
         pat_attributes = sp.ppat_attributes;
         pat_env = !env }
   | Ppat_structured_name (name, tags) ->
-      let structured_name_inferred_type = 
+      let structured_name_inferred_type =
         match tags with
         | Total_single   _ -> 
             newty (Tarrow(Nolabel, newgenvar(), newgenvar(), Cok))
@@ -3770,15 +3775,20 @@ and type_pat_aux ~exception_allowed ~constrs ~labels ~no_existentials ~mode
       let tag_idents = 
         match tags with
         | Parsetree.Total_single tag -> 
-            Typedtree.Total_single   (enter_active_tag tag ty, tag) 
+            Tvar_total_single   (enter_active_tag tag ty Act_single,  tag) 
         | Parsetree.Partial_single tag -> 
-            Typedtree.Partial_single (enter_active_tag tag ty, tag) 
+            Tvar_partial_single (enter_active_tag tag ty Act_partial, tag) 
         | Parsetree.Total_multi tags -> 
-            Typedtree.Total_multi
-              (List.map (fun tag -> (enter_active_tag tag ty, tag)) tags)
+            let n = List.length tags in
+            Tvar_total_multi
+              (List.mapi 
+                (fun i tag -> (enter_active_tag tag ty 
+                                    (Act_multi {actm_num = i; actm_amount = n})
+                              , tag)) 
+                tags)
       in
       rp k {
-        pat_desc  = Tpat_structured_name (name_ident, name, tag_idents);
+        pat_desc  = Tpat_var (name_ident, name, tag_idents);
         pat_loc   = loc;
         pat_extra = [];
         pat_type  = ty;
@@ -3789,7 +3799,7 @@ and type_pat_aux ~exception_allowed ~constrs ~labels ~no_existentials ~mode
       let t = instance expected_ty in
       let id = enter_variable loc name t ~is_module:true sp.ppat_attributes in
       rp k {
-        pat_desc = Tpat_var (id, name);
+        pat_desc = Tpat_var (id, name, Tvar_plain);
         pat_loc = sp.ppat_loc;
         pat_extra=[Tpat_unpack, loc, sp.ppat_attributes];
         pat_type = t;
@@ -3812,7 +3822,7 @@ and type_pat_aux ~exception_allowed ~constrs ~labels ~no_existentials ~mode
           generalize ty';
           let id = enter_variable lloc name ty' attrs in
           rp k {
-            pat_desc = Tpat_var (id, name);
+            pat_desc = Tpat_var (id, name, Tvar_plain);
             pat_loc = lloc;
             pat_extra = [Tpat_constraint cty, loc, sp.ppat_attributes];
             pat_type = ty;
@@ -4013,8 +4023,15 @@ and type_pat_aux ~exception_allowed ~constrs ~labels ~no_existentials ~mode
         with Not_found ->
           raise(Error(tag.loc, !env, Unbound_tag tag_str))
       in
-      assert (active_pattern.val_kind = Val_active_tag);
-      let arg = type_pat sarg (newgenvar()) Fun.id in
+      assert (match active_pattern.val_kind with 
+             | Val_active_tag _ -> true
+             | _                -> false);
+      let arg = type_pat 
+        (Option.value sarg ~default:(Ast_helper.Pat.construct 
+                                        (mknoloc (Longident.Lident "()")) None))
+        (newgenvar()) 
+        Fun.id 
+      in
       let params = List.map (type_exp !env) params in
       let ty_arg = instance arg.pat_type in
       let active_pattern_inferred_type = 
@@ -4028,7 +4045,7 @@ and type_pat_aux ~exception_allowed ~constrs ~labels ~no_existentials ~mode
       unify_exp_types
         tag.loc !env ty (instance active_pattern_inferred_type);
       rp k {
-        pat_desc = Tpat_parameterized(tag, path, active_pattern, params, arg);
+        pat_desc = Tpat_active(tag, path, active_pattern, params, [arg]);
         pat_loc = loc; pat_extra=[];
         pat_type = ty_arg;
         pat_attributes = sp.ppat_attributes;
@@ -4183,7 +4200,7 @@ and type_pat_aux ~exception_allowed ~constrs ~labels ~no_existentials ~mode
         let extra = (Tpat_constraint cty, loc, sp.ppat_attributes) in
         let p =
           match p.pat_desc with
-            Tpat_var (id,s) ->
+            Tpat_var (id,s,Tvar_plain) ->
               {p with pat_type = ty;
                pat_desc = Tpat_alias
                  ({p with pat_desc = Tpat_any; pat_attributes = []}, id,s);
@@ -4287,9 +4304,11 @@ and add_pattern_variables ?check ?check_as pv env =
 
 and add_active_tags ?check tags env =
   List.fold_right
-    (fun {at_id; at_type; at_loc} env ->
+    (fun {at_id; at_desc; at_type; at_loc} env ->
        Env.add_value ?check at_id
-         {val_type = at_type; val_kind = Val_active_tag; Types.val_loc = at_loc;
+         {Types.val_type = at_type; 
+          val_kind       = Val_active_tag at_desc;
+          val_loc        = at_loc;
           val_attributes = [];
          } 
          env

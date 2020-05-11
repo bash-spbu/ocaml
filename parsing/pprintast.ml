@@ -440,11 +440,19 @@ and simple_pattern ctxt (f:Format.formatter) (x:pattern) : unit =
   if x.ppat_attributes <> [] then pattern ctxt f x
   else match x.ppat_desc with
     | Ppat_construct (({txt=Lident ("()"|"[]" as x);_}), _) -> pp f  "%s" x
-    | Ppat_parameterized (li, el, p) ->
-        pp f "@[<2><%a %a> %a@]"
-          longident_loc li
-          (list (expression ctxt) ~sep:" ") el
-          (pattern1 ctxt) p
+    | Ppat_parameterized (li, el, po) ->
+        begin match po with
+        | Some x ->
+            pp f "@[<2><%a %a> %a@]"
+              longident_loc li
+              (list (expression ctxt) ~sep:" ") el
+              (pattern1 ctxt) x
+        | None ->
+            pp f "<%a %a>"
+              longident_loc li
+              (list (expression ctxt) ~sep:" ") el
+        end
+        
     | Ppat_any -> pp f "_";
     | Ppat_var ({txt = txt;_}) -> protect_ident f txt
     | Ppat_structured_name (_, tags) -> 

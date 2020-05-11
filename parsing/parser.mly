@@ -2597,7 +2597,8 @@ constr_gen:
   | name_tag                pattern %prec prec_constr_appl 
       { mkpat ~loc:$sloc (Ppat_variant  ($1, Some $2)) }
   | LESS mkrhs(constr_longident) nonempty_llist(simple_expr) GREATER pattern 
-      { mkpat ~loc:$sloc (Ppat_parameterized($2, $3, $5)) }
+      %prec prec_constr_appl 
+      { mkpat ~loc:$sloc (Ppat_parameterized($2, $3, Some $5)) }
   | LESS mkrhs(constr_longident) nonempty_llist(simple_expr) error
       { unclosed "<" $loc($1) ">" $loc($4) }
 ;
@@ -2634,6 +2635,8 @@ simple_pattern_not_ident:
       { Ppat_construct($1, None) }
   | name_tag
       { Ppat_variant($1, None) }
+  | LESS mkrhs(constr_longident) nonempty_llist(simple_expr) GREATER
+      { Ppat_parameterized($2, $3, None) }
   | HASH mkrhs(type_longident)
       { Ppat_type ($2) }
   | mkrhs(mod_longident) DOT simple_delimited_pattern

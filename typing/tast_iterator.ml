@@ -161,14 +161,12 @@ let pat sub {pat_extra; pat_desc; pat_env; _} =
   match pat_desc with
   | Tpat_any  -> ()
   | Tpat_var _ -> ()
-  | Tpat_structured_name _ -> ()
   | Tpat_constant _ -> ()
   | Tpat_tuple l -> List.iter (sub.pat sub) l
-  | Tpat_construct (_, _, l) | Tpat_active (_, _ , _, l) -> 
-      List.iter (sub.pat sub) l
-  | Tpat_parameterized (_, _, _, exprs, pat) -> 
+  | Tpat_construct (_, _, l) -> List.iter (sub.pat sub) l
+  | Tpat_active (_, _, _, exprs, pats) -> 
       List.iter (sub.expr sub) exprs;
-      sub.pat sub pat;
+      List.iter (sub.pat sub) pats
   | Tpat_variant (_, po, _) -> Option.iter (sub.pat sub) po
   | Tpat_record (l, _) -> List.iter (fun (_, _, i) -> sub.pat sub i) l
   | Tpat_array l -> List.iter (sub.pat sub) l

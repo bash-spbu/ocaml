@@ -77,6 +77,10 @@ type matrix = pattern list list
 
 let add_omega_column pss = List.map (fun ps -> omega::ps) pss
 
+(** 
+Represents one row of a "context" as last is defined in the paper.
+@see "Lefessant-Maranget Optimizing Pattern-Matching ICFP'2001" section 6.1
+*)
 type ctx = {left:pattern list ; right:pattern list}
 
 let pretty_ctx ctx =
@@ -97,6 +101,7 @@ let lforget {left=left ; right=right} = match right with
 | _::xs -> {left=omega::left ; right=xs}
 |  _ -> assert false
 
+(** Same as [fun n l -> List.length l <= n] *)
 let rec small_enough n = function
   | [] -> true
   | _::rem ->
@@ -116,6 +121,7 @@ let  rshift {left=left ; right=right} = match left with
 
 let ctx_rshift ctx = List.map rshift ctx
 
+(** Splits list [ps] by index [n] *)
 let rec nchars n ps =
   if n <= 0 then [],ps
   else match ps with
@@ -148,6 +154,14 @@ let ncols = function
 exception NoMatch
 exception OrPat
 
+(** 
+Represents specialization for simple matrices, i.e.
+it works like specialization of context with empty prefix 
+(left,  c.f. {!type:ctx}) and producing result as a fringe 
+(right, c.f. {!type:ctx}).
+@param matcher see [ctx_matcher] next
+@see "Lefessant-Maranget Optimizing Pattern-Matching ICFP'2001" section 6.1
+*)
 let filter_matrix matcher pss =
 
   let rec filter_rec = function
@@ -176,6 +190,13 @@ let filter_matrix matcher pss =
         fatal_error "Matching.filter_matrix" in
   filter_rec pss
 
+(** 
+Represents specialization for reachable trap handlers environment.
+N.B. \[\]     represents empty matrix which matches nothing, whereas
+     \[\[\]\] represents       matrix which matches everything
+@param matcher see [matcher_* e.g. matcher_tuple] but not! [ctx_matcher]
+@see "Lefessant-Maranget Optimizing Pattern-Matching ICFP'2001" section 6.1
+*)
 let make_default matcher env =
   let rec make_rec = function
     | [] -> []
@@ -188,6 +209,20 @@ let make_default matcher env =
         | pss -> (pss,i)::rem in
   make_rec env
 
+(** 
+Creates so called ``matcher'' according to the param pattern [p], i.e.
+function which will 
+- normalize [p] (see [normalize_pat])
+- take a pattern [q] and a pattern row [rem]
+- check whether [q] admits [p]
+- if yes, it will return pair of normalized [p] and 
+    pattern row being prepended with arguments of [p]
+- if no, it will throw [NoMatch]
+
+N.B. the special case for active patterns.
+
+see {!filter_ctx} as (the only) use case
+*)
 let ctx_matcher p =
   let p = normalize_pat p in
   match p.pat_desc with
@@ -197,37 +232,37 @@ let ctx_matcher p =
 (* NB:  may_constr_equal considers (potential) constructor rebinding *)
         when Types.may_equal_constr cstr cstr' ->
           p,args@rem
-      | Tpat_any -> p,omegas @ rem
+      | Tpat_any | Tpat_active _ -> p,omegas @ rem
       | _ -> raise NoMatch)
   | Tpat_constant cst ->
       (fun q rem -> match q.pat_desc with
       | Tpat_constant cst' when const_compare cst cst' = 0 ->
           p,rem
-      | Tpat_any -> p,rem
+      | Tpat_any | Tpat_active _ -> p,rem
       | _ -> raise NoMatch)
   | Tpat_variant (lab,Some omega,_) ->
       (fun q rem -> match q.pat_desc with
       | Tpat_variant (lab',Some arg,_) when lab=lab' ->
           p,arg::rem
-      | Tpat_any -> p,omega::rem
+      | Tpat_any | Tpat_active _ -> p,omega::rem
       | _ -> raise NoMatch)
   | Tpat_variant (lab,None,_) ->
       (fun q rem -> match q.pat_desc with
       | Tpat_variant (lab',None,_) when lab=lab' ->
           p,rem
-      | Tpat_any -> p,rem
+      | Tpat_any | Tpat_active _ -> p,rem
       | _ -> raise NoMatch)
   | Tpat_array omegas ->
       let len = List.length omegas in
       (fun q rem -> match q.pat_desc with
       | Tpat_array args when List.length args = len -> p,args @ rem
-      | Tpat_any -> p, omegas @ rem
+      | Tpat_any | Tpat_active _ -> p, omegas @ rem
       | _ -> raise NoMatch)
   | Tpat_tuple omegas ->
       let len = List.length omegas  in
       (fun q rem -> match q.pat_desc with
       | Tpat_tuple args when List.length args = len -> p,args @ rem
-      | Tpat_any -> p, omegas @ rem
+      | Tpat_any | Tpat_active _ -> p, omegas @ rem
       | _ -> raise NoMatch)
   | Tpat_record (((_, lbl, _) :: _) as l,_) -> (* Records are normalized *)
       let len = Array.length lbl.lbl_all in
@@ -236,18 +271,26 @@ let ctx_matcher p =
         when Array.length lbl'.lbl_all = len ->
           let l' = all_record_args l' in
           p, List.fold_right (fun (_, _,p) r -> p::r) l' rem
-      | Tpat_any -> p,List.fold_right (fun (_, _,p) r -> p::r) l rem
+      | Tpat_any | Tpat_active _ -> 
+          p,List.fold_right (fun (_, _,p) r -> p::r) l rem
       | _ -> raise NoMatch)
   | Tpat_lazy omega ->
       (fun q rem -> match q.pat_desc with
       | Tpat_lazy arg -> p, (arg::rem)
-      | Tpat_any      -> p, (omega::rem)
+      | Tpat_any | Tpat_active _ -> p, (omega::rem)
       | _             -> raise NoMatch)
+  | Tpat_active (_, _, _, _, omegas) ->
+      (fun q rem -> match q.pat_desc with
+      | Tpat_active _ -> p, (omegas @ rem) (* TODO: can be improved *)
+      | _             -> p, (omegas @ rem))
  | _ -> fatal_error "Matching.ctx_matcher"
 
 
 
-
+(** 
+Represents specialization of context [ctx] by pattern [q].
+@see "Lefessant-Maranget Optimizing Pattern-Matching ICFP'2001" section 6.1
+*)
 let filter_ctx q ctx =
 
   let matcher = ctx_matcher q in
@@ -302,11 +345,18 @@ let ctx_lub p ctx =
       | _ -> fatal_error "Matching.ctx_lub")
     ctx []
 
+(** Checks whether intersection of [ctx] right part and [pss] is not empty *)
 let ctx_match ctx pss =
   List.exists
     (fun {right=qs} ->  List.exists (fun ps -> may_compats qs ps)  pss)
     ctx
 
+(** 
+Represents jump summaries.
+Invariant: jumps are sorted in descending order w.r.t. exit numbers.
+@see "Lefessant-Maranget Optimizing Pattern-Matching ICFP'2001" section 6.0
+     (last paragraph)
+*)
 type jumps = (int * ctx list) list
 
 let pretty_jumps (env : jumps) = match env with
@@ -597,7 +647,7 @@ let simplify_cases args cls = match args with
       | [] -> []
       | ((pat :: patl, action) as cl) :: rem ->
           begin match pat.pat_desc with
-          | Tpat_var (id, _) ->
+          | Tpat_var (id, _, _) ->
               let k = Typeopt.value_kind pat.pat_env pat.pat_type in
               (omega :: patl, bind_with_value_kind Alias (id, k) arg action) ::
               simplify rem
@@ -691,7 +741,7 @@ let rec explode_or_pat arg patl mk_action rem vars aliases = function
         vars aliases p1
   | {pat_desc = Tpat_alias (p,id, _)} ->
       explode_or_pat arg patl mk_action rem vars (id::aliases) p
-  | {pat_desc = Tpat_var (x, _)} ->
+  | {pat_desc = Tpat_var (x, _, _)} ->
       let env = mk_alpha_env arg (x::aliases) vars in
       (omega::patl,mk_action (List.map snd env))::rem
   | p ->
@@ -765,6 +815,10 @@ and group_lazy = function
   | {pat_desc = Tpat_lazy _} -> true
   | _ -> false
 
+and group_active = function
+  | {pat_desc = Tpat_active _} -> true
+  | _ -> false
+
 let get_group p = match p.pat_desc with
 | Tpat_any -> group_var
 | Tpat_constant Const_int _ -> group_const_int
@@ -780,6 +834,7 @@ let get_group p = match p.pat_desc with
 | Tpat_array _ -> group_array
 | Tpat_variant (_,_,_) -> group_variant
 | Tpat_lazy _ -> group_lazy
+| Tpat_active _ -> group_active
 |  _ -> fatal_error "Matching.get_group"
 
 
@@ -2644,7 +2699,10 @@ let comp_exit ctx m = match m.default with
 | _        -> fatal_error "Matching.comp_exit"
 
 
-
+(** 
+Code generation for mixture rule sequencing of spitted matrices
+@see "Lefessant-Maranget Optimizing Pattern-Matching ICFP'2001" section 6.2 p.5
+*)
 let rec comp_match_handlers comp_fun partial ctx arg first_match next_matchs =
   match next_matchs with
   | [] -> comp_fun partial ctx arg first_match
@@ -2684,12 +2742,16 @@ let rec comp_match_handlers comp_fun partial ctx arg first_match next_matchs =
 let rec name_pattern default = function
     (pat :: _, _) :: rem ->
       begin match pat.pat_desc with
-        Tpat_var (id, _) -> id
+        Tpat_var (id, _, _) -> id
       | Tpat_alias(_, id, _) -> id
       | _ -> name_pattern default rem
       end
   | _ -> Ident.create_local default
 
+(** 
+We want every argument of the pattern matching 
+to be stored in some variable, to be able to refer to it by name 
+*)
 let arg_to_var arg cls = match arg with
 | Lvar v -> v,arg
 | _ ->
@@ -2828,7 +2890,8 @@ let find_in_pat pred =
     begin match p.pat_desc with
     | Tpat_alias (p,_,_) | Tpat_variant (_,Some p,_) | Tpat_lazy p ->
         find_rec p
-    | Tpat_tuple ps|Tpat_construct (_,_,ps) | Tpat_array ps ->
+    | Tpat_tuple ps|Tpat_construct (_,_,ps) | Tpat_array ps 
+    | Tpat_active (_,_,_,_,ps) ->
         List.exists find_rec ps
     | Tpat_record (lpats,_) ->
         List.exists
@@ -2845,7 +2908,7 @@ let find_in_pat pred =
 let is_lazy_pat = function
   | Tpat_lazy _ -> true
   | Tpat_alias _ | Tpat_variant _ | Tpat_record _
-  | Tpat_tuple _|Tpat_construct _ | Tpat_array _
+  | Tpat_tuple _|Tpat_construct _ | Tpat_array _ | Tpat_active _
   | Tpat_or _ | Tpat_constant _ | Tpat_var _ | Tpat_any
       -> false
   | Tpat_exception _ -> assert false
@@ -2863,7 +2926,7 @@ let have_mutable_field p = match p with
 | Tpat_alias _ | Tpat_variant _ | Tpat_lazy _
 | Tpat_tuple _|Tpat_construct _ | Tpat_array _
 | Tpat_or _
-| Tpat_constant _ | Tpat_var _ | Tpat_any
+| Tpat_constant _ | Tpat_var _ | Tpat_any | Tpat_active _
   -> false
 | Tpat_exception _ -> assert false
 
@@ -3067,7 +3130,7 @@ let for_let loc param pat body =
       (* This eliminates a useless variable (and stack slot in bytecode)
          for "let _ = ...". See #6865. *)
       Lsequence(param, body)
-  | Tpat_var (id, _) ->
+  | Tpat_var (id, _, _) ->
       (* fast path, and keep track of simple bindings to unboxable numbers *)
       let k = Typeopt.value_kind pat.pat_env pat.pat_type in
       Llet(Strict, k, id, param, body)

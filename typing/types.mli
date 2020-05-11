@@ -253,6 +253,7 @@ type value_description =
 and value_kind =
     Val_reg                             (* Regular value *)
   | Val_active_tag                      (* Tag of active pattern *)
+             of active_tag_kind   
   | Val_prim of Primitive.description   (* Primitive *)
   | Val_ivar of mutable_flag * string   (* Instance variable (mutable ?) *)
   | Val_self of (Ident.t * type_expr) Meths.t ref *
@@ -266,6 +267,11 @@ and value_kind =
 and value_unbound_reason =
   | Val_unbound_instance_variable
   | Val_unbound_ghost_recursive
+
+and active_tag_kind =
+  | Act_single
+  | Act_multi of {actm_num: int; actm_amount: int}
+  | Act_partial
 
 (* Variance *)
 

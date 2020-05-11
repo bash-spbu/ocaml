@@ -442,7 +442,7 @@ module P = struct
     | Ppat_construct (l, p) ->
         iter_loc sub l; iter_opt (sub.pat sub) p
     | Ppat_parameterized (l, el, p) ->
-        iter_loc sub l; List.iter (sub.expr sub) el; sub.pat sub p
+        iter_loc sub l; List.iter (sub.expr sub) el; iter_opt (sub.pat sub) p
     | Ppat_variant (_l, p) -> iter_opt (sub.pat sub) p
     | Ppat_record (lpl, _cf) ->
         List.iter (iter_tuple (iter_loc sub) (sub.pat sub)) lpl

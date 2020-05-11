@@ -65,13 +65,11 @@ and pat_extra =
 and pattern_desc =
     Tpat_any
         (** _ *)
-  | Tpat_var of Ident.t * string loc
-        (** x *)
-  | Tpat_structured_name of Ident.t * string loc * structured_name_tags_idents
-        (** Active pattern structured name: 
-            (|C|)
-            (|C_1|...|C_n|)    what is needed for typing 
-            (|C_1|_|)
+  | Tpat_var of Ident.t * string loc * var_kind
+        (** x                 Tvar_plain
+            (|C|)             Tvar_total_single   C
+            (|C_1|...|C_n|)   Tvar_total_multi    [C_1; ...; C_n]
+            (|C|_|)           Tvar_partial_single C
           *)
   | Tpat_alias of pattern * Ident.t * string loc
         (** P as a *)
@@ -89,26 +87,19 @@ and pattern_desc =
             C (P1, ..., Pn)  [P1; ...; Pn]
           *)
   | Tpat_active of 
-      Longident.t loc * Path.t * Types.value_description * pattern list
-        (** C P              [P]
-            C (P1, ..., Pm)  [P1; ...; Pm]
+      Longident.t loc * Path.t * Types.value_description * 
+        expression list * pattern list
+        (** C                              []             []
+            C             P                []             [P]
+            C             (P1, ..., Pm)    []             [P1; ...; Pm]
+            <C E1 ... En>                  [E1; ...; En]  []
+            <C E1 ... En> P                [E1; ...; En]  [P]
+            <C E1 ... En> (P1, ..., Pm)    [E1; ...; En]  [P1; ...; Pm]
             
             where C is a tag of some active pattern, i.e. belongs to some
-            structured name (|C1|...|C|...|Cn|)
+            structured name (|C1|...|C|...|Cn|) or (|C|_|)
 
-            Invariant: [Types.value_description.val_kind = Val_active_tag]
-          *)
-  | Tpat_parameterized of
-      Longident.t loc * Path.t * Types.value_description * expression list 
-        * pattern
-        (** <C E1 ... En> P  [E1; ...; En]  P
-            
-            where C is a tag of some partial active pattern with parameters,
-            e.g.
-            let (|C|_|) e_1 ... e_m p = ...
-
-            Invariant: m >= 1
-                    && [Types.value_description.val_kind = Val_active_tag]
+            Invariant: [Types.value_description.val_kind = Val_active_tag _]
           *)
   | Tpat_variant of label * pattern option * row_desc ref
         (** `A             (None)
@@ -137,12 +128,11 @@ and pattern_desc =
   | Tpat_exception of pattern
         (** exception P *)
 
-(** Same as [Parsetree.structured_name_tags] 
-    but with [Ident.t] added for each tag *)
-and structured_name_tags_idents =
-  | Total_single   of Ident.t * string loc         (* (|C|)           *)
-  | Partial_single of Ident.t * string loc         (* (|C|_|)         *)
-  | Total_multi    of (Ident.t * string loc) list  (* (|C1|...|Cn|)   *)
+and var_kind =
+  | Tvar_plain                                          (* x               *)
+  | Tvar_total_single   of Ident.t * string loc         (* (|C|)           *)
+  | Tvar_partial_single of Ident.t * string loc         (* (|C|_|)         *)
+  | Tvar_total_multi    of (Ident.t * string loc) list  (* (|C1|...|Cn|)   *)
 
 and expression =
   { exp_desc: expression_desc;

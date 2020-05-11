@@ -200,7 +200,8 @@ and pattern_desc =
   | Ppat_structured_name of string loc * structured_name_tags
         (* (|C|)              single-case total
            (|C_1|...|C_n|)    multi-case  total
-           (|C|_|)            single-case partial *)
+           (|C|_|)            single-case partial 
+         *)
   | Ppat_alias of pattern * string loc
         (* P as 'a *)
   | Ppat_constant of constant
@@ -215,21 +216,17 @@ and pattern_desc =
 
            Invariant: n >= 2
         *)
-  | Ppat_parameterized of Longident.t loc * expression list * pattern
-        (* C param_1 ... param_n P
-
-           Represents active pattern parameterization:
-           <Regexp "(\w+)-(\w+)"> [l;r]       
-             longident   = Regexp
-             params list = ["(\w+)-(\w+)"]
-             pattern = Ppat_construct(::, Some(Ppat_tuple [Ppat_var "l", ...]))
-
-           Invariant: n >= 1
-        *)
   | Ppat_construct of Longident.t loc * pattern option
         (* C                None
            C P              Some P
            C (P1, ..., Pn)  Some (Ppat_tuple [P1; ...; Pn])
+         *)
+  | Ppat_parameterized of Longident.t loc * expression list * pattern option
+        (* <C E1 ... Em>                None
+           <C E1 ... Em> P              Some P
+           <C E1 ... Em> (P1, ..., Pn)  Some (Ppat_tuple [P1; ...; Pn])    
+           
+           Invariant: m >= 1
          *)
   | Ppat_variant of label * pattern option
         (* `A             (None)

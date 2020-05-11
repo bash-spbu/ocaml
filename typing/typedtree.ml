@@ -43,18 +43,15 @@ and pat_extra =
 
 and pattern_desc =
     Tpat_any
-  | Tpat_var of Ident.t * string loc
-  | Tpat_structured_name of Ident.t * string loc * structured_name_tags_idents
+  | Tpat_var of Ident.t * string loc * var_kind
   | Tpat_alias of pattern * Ident.t * string loc
   | Tpat_constant of constant
   | Tpat_tuple of pattern list
   | Tpat_construct of
       Longident.t loc * constructor_description * pattern list
   | Tpat_active of 
-      Longident.t loc * Path.t * Types.value_description * pattern list
-  | Tpat_parameterized of
-      Longident.t loc * Path.t * Types.value_description * expression list 
-        * pattern
+      Longident.t loc * Path.t * Types.value_description * 
+        expression list * pattern list
   | Tpat_variant of label * pattern option * row_desc ref
   | Tpat_record of
       (Longident.t loc * label_description * pattern) list *
@@ -64,10 +61,11 @@ and pattern_desc =
   | Tpat_lazy of pattern
   | Tpat_exception of pattern
 
-and structured_name_tags_idents =
-  | Total_single   of Ident.t * string loc         (* (|C|)           *)
-  | Partial_single of Ident.t * string loc         (* (|C|_|)         *)
-  | Total_multi    of (Ident.t * string loc) list  (* (|C1|...|Cn|)   *)
+and var_kind =
+  | Tvar_plain                                          (* x               *)
+  | Tvar_total_single   of Ident.t * string loc         (* (|C|)           *)
+  | Tvar_partial_single of Ident.t * string loc         (* (|C|_|)         *)
+  | Tvar_total_multi    of (Ident.t * string loc) list  (* (|C1|...|Cn|)   *)
 
 and expression =
   { exp_desc: expression_desc;
@@ -602,8 +600,7 @@ and 'a class_infos =
 let iter_pattern_desc f = function
   | Tpat_alias(p, _, _) -> f p
   | Tpat_tuple patl -> List.iter f patl
-  | Tpat_construct(_, _, patl) | Tpat_active(_, _, _, patl) -> List.iter f patl
-  | Tpat_parameterized(_, _, _, _, pat) -> f pat
+  | Tpat_construct(_, _, patl) | Tpat_active(_, _, _, _, patl) -> List.iter f patl
   | Tpat_variant(_, pat, _) -> may f pat
   | Tpat_record (lbl_pat_list, _) ->
       List.iter (fun (_, _, pat) -> f pat) lbl_pat_list
@@ -613,7 +610,6 @@ let iter_pattern_desc f = function
   | Tpat_exception p -> f p
   | Tpat_any
   | Tpat_var _
-  | Tpat_structured_name _
   | Tpat_constant _ -> ()
 
 let map_pattern_desc f d =
@@ -626,10 +622,8 @@ let map_pattern_desc f d =
       Tpat_record (List.map (fun (lid, l,p) -> lid, l, f p) lpats, closed)
   | Tpat_construct (lid, c,pats) ->
       Tpat_construct (lid, c, List.map f pats)
-  | Tpat_active (lid, path, value, pats) ->
-      Tpat_active (lid, path, value, List.map f pats)
-  | Tpat_parameterized (lid, path, value, exprs, pat) ->
-      Tpat_parameterized (lid, path, value, exprs, f pat)
+  | Tpat_active (lid, path, value, exprs, pats) ->
+      Tpat_active (lid, path, value, exprs, List.map f pats)
   | Tpat_array pats ->
       Tpat_array (List.map f pats)
   | Tpat_lazy p1 -> Tpat_lazy (f p1)
@@ -641,7 +635,6 @@ let map_pattern_desc f d =
   | Tpat_var _
   | Tpat_constant _
   | Tpat_any
-  | Tpat_structured_name _
   | Tpat_variant (_,None,_) -> d
 
 (* List the identifiers bound by a pattern or a let *)
@@ -650,7 +643,7 @@ let idents = ref([]: (Ident.t * string loc * Types.type_expr) list)
 
 let rec bound_idents pat =
   match pat.pat_desc with
-  | Tpat_var (id,s) -> idents := (id,s,pat.pat_type) :: !idents
+  | Tpat_var (id,s,_) -> idents := (id,s,pat.pat_type) :: !idents
   | Tpat_alias(p, id, s) ->
       bound_idents p; idents := (id,s,pat.pat_type) :: !idents
   | Tpat_or(p1, _, _) ->
@@ -685,9 +678,9 @@ let let_bound_idents pat =
 let alpha_var env id = List.assoc id env
 
 let rec alpha_pat env p = match p.pat_desc with
-| Tpat_var (id, s) -> (* note the ``Not_found'' case *)
+| Tpat_var (id, s, kind) -> (* note the ``Not_found'' case *)
     {p with pat_desc =
-     try Tpat_var (alpha_var env id, s) with
+     try Tpat_var (alpha_var env id, s, kind) with
      | Not_found -> Tpat_any}
 | Tpat_alias (p1, id, s) ->
     let new_p =  alpha_pat env p1 in

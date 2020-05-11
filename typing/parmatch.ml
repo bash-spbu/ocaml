@@ -34,7 +34,7 @@ let omega = make_pat Tpat_any Ctype.none Env.empty
 
 let extra_pat =
   make_pat
-    (Tpat_var (Ident.create_local "+", mknoloc "+"))
+    (Tpat_var (Ident.create_local "+", mknoloc "+", Tvar_plain))
     Ctype.none Env.empty
 
 let rec omegas i =
@@ -297,6 +297,8 @@ module Compat
 (* Constructors, with special case for extension *)
   | Tpat_construct (_, c1,ps1), Tpat_construct (_, c2,ps2) ->
       Constr.equal c1 c2 && compats ps1 ps2
+(* Compatibility check for active patterns is obviously undecidable *)
+  | (Tpat_active _, _) | (_, Tpat_active _) -> true
 (* More standard stuff *)
   | Tpat_variant(l1,op1, _), Tpat_variant(l2,op2,_) ->
       l1=l2 && ocompat op1 op2
@@ -443,6 +445,10 @@ let rec normalize_pat q = match q.pat_desc with
         q.pat_type q.pat_env
   | Tpat_lazy _ ->
       make_pat (Tpat_lazy omega) q.pat_type q.pat_env
+  | Tpat_active (lid, path, apat, exprs, args) ->
+      make_pat 
+        (Tpat_active (lid, path, apat, exprs, omega_list args))
+        q.pat_type q.pat_env
   | Tpat_or _
   | Tpat_exception _ -> fatal_error "Parmatch.normalize_pat"
 
@@ -561,6 +567,12 @@ let do_set_args erase_mutable q r = match q with
     make_pat
       (Tpat_variant (l, arg, row)) q.pat_type q.pat_env::
     rest
+| {pat_desc = Tpat_active(lid, path, apat, params, omegas)} ->
+    let args, rest = read_args omegas r in
+    make_pat 
+      (Tpat_active(lid, path, apat, params, args)) q.pat_type q.pat_env
+    ::
+    rest
 | {pat_desc = Tpat_lazy _omega} ->
     begin match r with
       arg::rest ->
@@ -606,7 +618,7 @@ let simplify_head_pat ~add_column p ps k =
   let rec simplify_head_pat p ps k =
     match p.pat_desc with
     | Tpat_alias (p,_,_) -> simplify_head_pat p ps k
-    | Tpat_var (_,_) -> add_column omega ps k
+    | Tpat_var _ -> add_column omega ps k
     | Tpat_or (p1,p2,_) -> simplify_head_pat p1 ps (simplify_head_pat p2 ps k)
     | _ -> add_column p ps k
   in simplify_head_pat p ps k
@@ -814,6 +826,29 @@ let full_match closing env =  match env with
         (fun (tag,f) ->
           Btype.row_field_repr f = Rabsent || List.mem tag fields)
         row.row_fields
+| ({pat_desc = Tpat_active(_, _, apat, _, _)}, _) :: _ ->
+    let akind = 
+      match apat with 
+      | {val_kind = Val_active_tag akind} -> akind
+      | _ -> assert false
+    in
+    begin match akind with
+    | Act_single -> true
+    | Act_multi {actm_amount} ->
+        let used_tags = 
+          List.filter_map
+            (function 
+            | ({pat_desc = 
+                  Tpat_active(_, _, 
+                    {val_kind = Val_active_tag(Act_multi {actm_num})}, _, _)}
+                  , _) 
+                -> Some(actm_num)
+            | _ -> None)
+            env
+        in
+        (List.init actm_amount Fun.id) = (List.sort compare used_tags)
+    | Act_partial -> true (* TODO *)
+    end
 | ({pat_desc = Tpat_constant(Const_char _)},_) :: _ ->
     List.length env = 256
 | ({pat_desc = Tpat_constant(_)},_) :: _ -> false
@@ -838,6 +873,7 @@ let should_extend ext env = match ext with
           (_, {cstr_tag=(Cstr_extension _)},_) -> false
       | Tpat_constant _|Tpat_tuple _|Tpat_variant _
       | Tpat_record  _|Tpat_array _ | Tpat_lazy _
+      | Tpat_active _
         -> false
       | Tpat_any|Tpat_var _|Tpat_alias _|Tpat_or _|Tpat_exception _
         -> assert false
@@ -975,7 +1011,8 @@ let build_other ext env = match env with
 | ({pat_desc = Tpat_construct (lid, {cstr_tag=Cstr_extension _},_)},_) :: _ ->
         (* let c = {c with cstr_name = "*extension*"} in *) (* PR#7330 *)
         make_pat (Tpat_var (Ident.create_local "*extension*",
-                            {lid with txt="*extension*"})) Ctype.none Env.empty
+                            {lid with txt="*extension*"}, Tvar_plain)) 
+                 Ctype.none Env.empty
 | ({pat_desc = Tpat_construct _} as p,_) :: _ ->
     begin match ext with
     | Some ext ->
@@ -1104,8 +1141,8 @@ let rec has_instance p = match p.pat_desc with
   | Tpat_any | Tpat_var _ | Tpat_constant _ | Tpat_variant (_,None,_) -> true
   | Tpat_alias (p,_,_) | Tpat_variant (_,Some p,_) -> has_instance p
   | Tpat_or (p1,p2,_) -> has_instance p1 || has_instance p2
-  | Tpat_construct (_,_,ps) | Tpat_tuple ps | Tpat_array ps ->
-      has_instances ps
+  | Tpat_construct (_,_,ps) | Tpat_tuple ps | Tpat_array ps 
+  | Tpat_active (_,_,_,_,ps) -> has_instances ps
   | Tpat_record (lps,_) -> has_instances (List.map (fun (_,_,x) -> x) lps)
   | Tpat_lazy p
     -> has_instance p
@@ -1721,6 +1758,8 @@ let rec le_pat p q =
   | Tpat_variant(_,_,_), Tpat_variant(_,_,_) -> false
   | Tpat_tuple(ps), Tpat_tuple(qs) -> le_pats ps qs
   | Tpat_lazy p, Tpat_lazy q -> le_pat p q
+(* Pattern relation on active patterns is undecidable *)
+  | Tpat_active _, _ -> false
   | Tpat_record (l1,_), Tpat_record (l2,_) ->
       let ps,qs = records_args l1 l2 in
       le_pats ps qs
@@ -1746,6 +1785,10 @@ let get_mins le ps =
 (*
   lub p q is a pattern that matches all values matched by p and q
   may raise Empty, when p and q are not compatible
+
+  N.B. it is impossible to compute least (exact) upper bound
+  in presence of active patterns so it replace them with [Tpat_any] 
+  resulting in some (non-exact) upper bound
 *)
 
 let rec lub p q = match p.pat_desc,q.pat_desc with
@@ -1780,6 +1823,9 @@ let rec lub p q = match p.pat_desc,q.pat_desc with
       when List.length ps = List.length qs ->
         let rs = lubs ps qs in
         make_pat (Tpat_array rs) p.pat_type p.pat_env
+| (Tpat_active _, _) | (_, Tpat_active _) -> 
+    make_pat Tpat_any p.pat_type p.pat_env
+    (* fatal_error "Parmatch.lub active pattern" *)
 | _,_  ->
     raise Empty
 
@@ -1880,7 +1926,7 @@ module Conv = struct
       match pat.pat_desc with
         Tpat_or (pa,pb,_) ->
           mkpat (Ppat_or (loop pa, loop pb))
-      | Tpat_var (_, ({txt="*extension*"} as nm)) -> (* PR#7330 *)
+      | Tpat_var (_, ({txt="*extension*"} as nm),_) -> (* PR#7330 *)
           mkpat (Ppat_var nm)
       | Tpat_any
       | Tpat_var _ ->
@@ -1901,6 +1947,7 @@ module Conv = struct
             | lst -> Some (mkpat (Ppat_tuple lst))
           in
           mkpat (Ppat_construct(lid, arg))
+      | Tpat_active _ -> mkpat Ppat_any       (* TODO *)
       | Tpat_variant(label,p_opt,_row_desc) ->
           let arg = Misc.may_map loop p_opt in
           mkpat (Ppat_variant(label, arg))
@@ -1930,7 +1977,7 @@ end
 let contains_extension pat =
   let r = ref false in
   let rec loop = function
-      {pat_desc=Tpat_var (_, {txt="*extension*"})} ->
+      {pat_desc=Tpat_var (_, {txt="*extension*"}, _)} ->
         r := true
     | p -> Typedtree.iter_pattern_desc loop p.pat_desc
   in loop pat; !r
@@ -2034,7 +2081,8 @@ let rec collect_paths_from_pat r p = match p.pat_desc with
       ps
 | Tpat_any|Tpat_var _|Tpat_constant _| Tpat_variant (_,None,_) -> r
 | Tpat_tuple ps | Tpat_array ps
-| Tpat_construct (_, {cstr_tag=Cstr_extension _}, ps)->
+| Tpat_construct (_, {cstr_tag=Cstr_extension _}, ps)
+| Tpat_active(_,_,_,_,ps) ->
     List.fold_left collect_paths_from_pat r ps
 | Tpat_record (lps,_) ->
     List.fold_left
@@ -2158,10 +2206,8 @@ let inactive ~partial pat =
   | Total -> begin
       let rec loop pat =
         match pat.pat_desc with
-        | Tpat_lazy _ | Tpat_array _ ->
-          false
-        | Tpat_any | Tpat_var _ | Tpat_variant (_, None, _) ->
-            true
+        | Tpat_lazy _ | Tpat_array _ | Tpat_active _ -> false
+        | Tpat_any | Tpat_var _ | Tpat_variant (_, None, _) -> true
         | Tpat_constant c -> begin
             match c with
             | Const_string _ -> Config.safe_string
@@ -2292,7 +2338,7 @@ let simplify_head_amb_pat head_bound_variables varsets ~add_column p ps k =
     match p.pat_desc with
     | Tpat_alias (p,x,_) ->
       simpl (Ident.Set.add x head_bound_variables) varsets p ps k
-    | Tpat_var (x,_) ->
+    | Tpat_var (x,_, _) ->
       let rest_of_the_row =
         { row = ps; varsets = Ident.Set.add x head_bound_variables :: varsets; }
       in

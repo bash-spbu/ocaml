@@ -220,7 +220,7 @@ let classify_expression : Typedtree.expression -> sd =
     let old_env = env in
     let add_value_binding env vb =
       match vb.vb_pat.pat_desc with
-      | Tpat_var (id, _loc) ->
+      | Tpat_var (id, _loc, _) ->
           let size = classify_expression old_env vb.vb_expr in
           Ident.add id size env
       | _ ->
@@ -1175,14 +1175,12 @@ and pattern : pattern -> Env.t -> mode = fun pat env ->
 and is_destructuring_pattern : Typedtree.pattern -> bool =
   fun pat -> match pat.pat_desc with
     | Tpat_any -> false
-    | Tpat_var (_, _) -> false
-    | Tpat_structured_name _ -> false
+    | Tpat_var _ -> false
     | Tpat_alias (pat, _, _) -> is_destructuring_pattern pat
     | Tpat_constant _ -> true
     | Tpat_tuple _ -> true
     | Tpat_construct (_, _, _) -> true
     | Tpat_active _ -> true
-    | Tpat_parameterized _ -> true
     | Tpat_variant _ -> true
     | Tpat_record (_, _) -> true
     | Tpat_array _ -> true
