@@ -23,7 +23,7 @@ let bind_variables scope =
   let super = Tast_mapper.default in
   let pat sub p =
     begin match p.pat_desc with
-    | Tpat_var (id, _) | Tpat_alias (_, id, _) ->
+    | Tpat_var (id, _, _) | Tpat_alias (_, id, _) ->
         Stypes.record (Stypes.An_ident (p.pat_loc,
                                         Ident.name id,
                                         Annot.Idef scope))

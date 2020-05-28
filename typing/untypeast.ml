@@ -352,7 +352,8 @@ let pattern sub pat =
         | Tpat_construct _ -> Ppat_construct (map_loc sub lid, mapped_args)
         | Tpat_active (_, _, _, exprs, _) ->
             Ppat_parameterized 
-              (map_loc sub lid, List.map (sub.expr sub) exprs, mapped_args)
+              (map_loc sub lid, List.map (sub.expr sub) exprs, 
+                Option.get mapped_args)
         | _ -> assert false
         end
     | Tpat_variant (label, pato, _) ->

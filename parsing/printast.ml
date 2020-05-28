@@ -226,10 +226,10 @@ and pattern i ppf x =
   | Ppat_construct (li, po) ->
       line i ppf "Ppat_construct %a\n" fmt_longident_loc li;
       option i pattern ppf po;
-  | Ppat_parameterized (li, el, po) ->
+  | Ppat_parameterized (li, el, p) ->
       line i ppf "Ppat_parameterized %a\n" fmt_longident_loc li;
       list i expression ppf el;
-      option i pattern ppf po;
+      pattern i ppf p;
   | Ppat_variant (l, po) ->
       line i ppf "Ppat_variant \"%s\"\n" l;
       option i pattern ppf po;

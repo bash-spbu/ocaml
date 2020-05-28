@@ -175,8 +175,8 @@ let rec add_pattern1 bv pat =
   | Ppat_constant _ -> ()
   | Ppat_tuple pl -> List.iter (add_pattern1 bv) pl
   | Ppat_construct(c, op) -> add bv c; add_opt add_pattern1 bv op
-  | Ppat_parameterized(li, el, op) ->
-      add bv li; List.iter (add_expr bv) el; add_opt add_pattern1 bv op
+  | Ppat_parameterized(li, el, p) ->
+      add bv li; List.iter (add_expr bv) el; add_pattern1 bv p
   | Ppat_record(pl, _) ->
       List.iter (fun (lbl, p) -> add bv lbl; add_pattern1 bv p) pl
   | Ppat_array pl -> List.iter (add_pattern1 bv) pl

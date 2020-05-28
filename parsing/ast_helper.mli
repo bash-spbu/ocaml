@@ -111,7 +111,7 @@ module Pat:
     val tuple: ?loc:loc -> ?attrs:attrs -> pattern list -> pattern
     val construct: ?loc:loc -> ?attrs:attrs -> lid -> pattern option -> pattern
     val parameterized: ?loc:loc -> ?attrs:attrs -> lid -> expression list 
-                -> pattern option -> pattern
+                -> pattern -> pattern
     val variant: ?loc:loc -> ?attrs:attrs -> label -> pattern option -> pattern
     val record: ?loc:loc -> ?attrs:attrs -> (lid * pattern) list -> closed_flag
                 -> pattern

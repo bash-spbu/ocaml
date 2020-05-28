@@ -1136,7 +1136,6 @@ let rec has_literal_pattern p = match p.ppat_desc with
   | Ppat_structured_name _
   | Ppat_variant (_, None)
   | Ppat_construct (_, None)
-  | Ppat_parameterized (_, _, None)
   | Ppat_type _
   | Ppat_var _
   | Ppat_unpack _
@@ -1145,7 +1144,7 @@ let rec has_literal_pattern p = match p.ppat_desc with
   | Ppat_exception p
   | Ppat_variant (_, Some p)
   | Ppat_construct (_, Some p)
-  | Ppat_parameterized (_, _, Some p)
+  | Ppat_parameterized (_, _, p)
   | Ppat_constraint (p, _)
   | Ppat_alias (p, _)
   | Ppat_lazy p
@@ -1582,12 +1581,11 @@ let iter_ppat f p =
   | Ppat_type _ | Ppat_unpack _ -> ()
   | Ppat_array pats -> List.iter f pats
   | Ppat_or (p1,p2) -> f p1; f p2
-  | Ppat_variant (_, arg) 
-  | Ppat_construct (_, arg)
-  | Ppat_parameterized (_, _, arg) -> may f arg
+  | Ppat_variant (_, arg) | Ppat_construct (_, arg) -> may f arg
   | Ppat_tuple lst ->  List.iter f lst
   | Ppat_exception p | Ppat_alias (p,_)
   | Ppat_open (_,p)
+  | Ppat_parameterized (_, _, p)
   | Ppat_constraint (p,_) | Ppat_lazy p -> f p
   | Ppat_record (args, _flag) -> List.iter (fun (_,p) -> f p) args
 
@@ -4026,12 +4024,7 @@ and type_pat_aux ~exception_allowed ~constrs ~labels ~no_existentials ~mode
       assert (match active_pattern.val_kind with 
              | Val_active_tag _ -> true
              | _                -> false);
-      let arg = type_pat 
-        (Option.value sarg ~default:(Ast_helper.Pat.construct 
-                                        (mknoloc (Longident.Lident "()")) None))
-        (newgenvar()) 
-        Fun.id 
-      in
+      let arg = type_pat sarg (newgenvar()) Fun.id in
       let params = List.map (type_exp !env) params in
       let ty_arg = instance arg.pat_type in
       let active_pattern_inferred_type = 

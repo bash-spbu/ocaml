@@ -221,10 +221,10 @@ and pattern_desc =
            C P              Some P
            C (P1, ..., Pn)  Some (Ppat_tuple [P1; ...; Pn])
          *)
-  | Ppat_parameterized of Longident.t loc * expression list * pattern option
-        (* <C E1 ... Em>                None
-           <C E1 ... Em> P              Some P
-           <C E1 ... Em> (P1, ..., Pn)  Some (Ppat_tuple [P1; ...; Pn])    
+  | Ppat_parameterized of Longident.t loc * expression list * pattern
+        (* <C E1 ... Em>                Ppat_construct ["()", None] 
+           <C E1 ... Em> P              P
+           <C E1 ... Em> (P1, ..., Pn)  Ppat_tuple [P1; ...; Pn]
            
            Invariant: m >= 1
          *)

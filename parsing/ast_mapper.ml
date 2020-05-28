@@ -475,7 +475,7 @@ module P = struct
         parameterized ~loc ~attrs 
           (map_loc sub l) 
           (List.map (sub.expr sub) exps) 
-          (map_opt (sub.pat sub) p)
+          (sub.pat sub p)
     | Ppat_variant (l, p) -> variant ~loc ~attrs l (map_opt (sub.pat sub) p)
     | Ppat_record (lpl, cf) ->
         record ~loc ~attrs
