@@ -471,9 +471,7 @@ rule token = parse
   | "`"  { BACKQUOTE }
   | "\'" { QUOTE }
   | "("  { LPAREN }
-  | "(|" { LPARENBAR }
   | ")"  { RPAREN }
-  | "|)" { BARRPAREN }
   | "*"  { STAR }
   | ","  { COMMA }
   | "->" { MINUSGREATER }

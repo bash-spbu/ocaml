@@ -221,7 +221,7 @@ let common_initial_env add_type add_extension empty_env =
          type_arity = List.length cstrs;
          type_kind = Type_variant
                        (List.map2 (fun c tv -> cstr c [tv]) cstrs tvars);
-         type_variance = [Variance.covariant]})
+         type_variance = List.map (fun _ -> Variance.covariant) cstrs})
       idents_choice_cstrs
   in
 

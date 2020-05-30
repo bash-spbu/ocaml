@@ -2733,7 +2733,7 @@ structured_name:
       { match $2 with
         | []  -> assert false
         | [x] -> Total_single x 
-        | xs  -> Total_multi  xs }
+        | xs  -> Total_multi  (List.rev xs) }
   | LPAREN structured_name_tags BAR UNDERSCORE BAR RPAREN
       { match $2 with
         | []  -> assert false

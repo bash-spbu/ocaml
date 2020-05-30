@@ -171,17 +171,17 @@ module ComplexNumbers_Example = struct
   let mul_via_rect c1 c2 = 
     match c1,c2 with 
     | Rect(ar,ai), Rect(br,bi) -> 
-        Complex.mk_rect(ar*br - ai*bi, ai*br + bi*ar)
+        Complex.mk_rect(ar *. br -. ai *. bi, ai *. br +. bi *. ar)
 
   let mul_via_polar c1 c2 = 
     match c1,c2 with 
-    | Polar(r1,th1),Polar(r2,th2) -> Complex.mk_polar(r1*r2, th1+th2)
+    | Polar(r1,th1),Polar(r2,th2) -> Complex.mk_polar(r1 *. r2, th1 +. th2)
 
   let mul1 (Rect(ar,ai)) (Rect(br,bi)) = 
-    Complex.mk_rect(ar*br - ai*bi, ai*br + bi*ar)
+    Complex.mk_rect(ar *. br -. ai *. bi, ai *. br +. bi *. ar)
 
   let mul2 (Polar(r1,th1)) (Polar(r2,th2)) = 
-    Complex.mk_polar(r1*r2, th1+th2)
+    Complex.mk_polar(r1 *. r2, th1 +. th2)
 end
 
 
@@ -195,7 +195,7 @@ module NaturalNumbers_Example = struct
     | Succ Zero     -> 1
     | Zero          -> 0
 
-  let (|Even|Odd|) n = if n % 2 = 0 then Even(n / 2) else Odd(n - 1)
+  let (|Even|Odd|) n = if n mod 2 = 0 then Even(n / 2) else Odd(n - 1)
 
   let rec power x n =
     match n with
@@ -314,15 +314,15 @@ end
 module PartialPattern_Examples = struct
 
   let (|MulThree|_|) inp = 
-    if inp % 3 = 0 then Some(inp / 3) else None
+    if inp mod 3 = 0 then Some(inp / 3) else None
   let (|MulSeven|_|) inp = 
-    if inp % 7 = 0 then Some(inp / 7) else None
+    if inp mod 7 = 0 then Some(inp / 7) else None
     
   let example1 inp = 
     match 21 with 
-    | MulThree(residue) -> printf "residue = %d!\n" residue
-    | MulSeven(residue) -> printf "residue = %d!\n" residue
-    | _                 -> printf "no match!\n"
+    | MulThree(residue) -> Printf.printf "residue = %d!\n" residue
+    | MulSeven(residue) -> Printf.printf "residue = %d!\n" residue
+    | _                 -> Printf.printf "no match!\n"
 
 (* 
    example1 777
@@ -336,14 +336,14 @@ end
 
 module ParameterizedPartialPattern_Examples = struct
   let (|Equal|_|) x y = 
-    printf "x = %d!\n" x;
+    Printf.printf "x = %d!\n" x;
     if x = y then Some() else None
     
   let example1 = 
     match 3 with 
-    | <Equal 4> () -> printf "3 = 4!\n"
-    | <Equal 3> () -> printf "3 = 3!\n"
-    | _            -> printf "3 = ?!\n"
+    | <Equal 4> () -> Printf.printf "3 = 4!\n"
+    | <Equal 3> () -> Printf.printf "3 = 3!\n"
+    | _            -> Printf.printf "3 = ?!\n"
 
   let (|Lookup|_|) x tbl = Hashtbl.find_opt tbl x
     
@@ -351,10 +351,10 @@ module ParameterizedPartialPattern_Examples = struct
     let tbl = Hashtbl.create 2 in
     List.iter (fun (k,v) -> Hashtbl.add tbl k v) [ "2", "Two" ; "3", "Three" ];
     match tbl with 
-    | <Lookup "4"> v -> printf "4 should not be present!\n"
-    | <Lookup "3"> v -> printf "map(3) = %s\n" v
-    | <Lookup "2"> v -> printf "this should not be reached\n"
-    | _              -> printf "3 = ?!\n"
+    | <Lookup "4"> v -> Printf.printf "4 should not be present!\n"
+    | <Lookup "3"> v -> Printf.printf "map(3) = %s\n" v
+    | <Lookup "2"> v -> Printf.printf "this should not be reached\n"
+    | _              -> Printf.printf "3 = ?!\n"
 end
      
 
@@ -378,6 +378,7 @@ module Combinator_Examples = struct
     (|E|_|)    
 end
 
+(* Some troubles with Str module
 module RegExp = struct
 
   let (|IsMatch|_|) (pat:string) (inp:string) = 
@@ -388,5 +389,5 @@ module RegExp = struct
   
   check "fwhin3op1" ((|IsMatch|_|) ".*.ml" "abc.ml") (Some "abc.ml")
 end
-
+*)
 
